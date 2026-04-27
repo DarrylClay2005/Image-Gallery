@@ -27,6 +27,7 @@ let activeDetail = null;
 let selectedCollectionMediaId = null;
 let selectedReportMediaId = null;
 let registerMode = false;
+const revealedAdultMedia = new Set();
 
 const $ = (id) => document.getElementById(id);
 
@@ -55,7 +56,11 @@ async function apiFetch(path, options = {}) {
   const response = await fetch(apiUrl(path), { ...options, headers });
   const text = await response.text();
   const data = text ? JSON.parse(text) : {};
-  if (!response.ok) throw new Error(data.detail || data.message || "Request failed");
+  if (!response.ok) {
+    const error = new Error(data.detail || data.message || "Request failed");
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 
@@ -87,10 +92,44 @@ function renderAuth() {
   $("account-card").hidden = !currentUser;
   if (currentUser) {
     $("account-name").textContent = currentUser.display_name || currentUser.username;
-    $("account-bio").textContent = currentUser.bio || "Your settings apply only to this account.";
+    $("account-bio").textContent = currentUser.age_verified
+      ? currentUser.bio || "Age verified. Your settings apply only to this account."
+      : currentUser.bio || "Verify age in settings to unlock 18+ posts.";
     renderAvatar("account-avatar", currentUser);
   }
   applyAccountSettings();
+}
+
+function openAgeDialog(message = "") {
+  if (!currentUser) return $("auth-dialog").showModal();
+  setNotice("age-error", message);
+  $("age-dialog").showModal();
+}
+
+function canRevealAdult(item) {
+  return !item?.is_adult || (currentUser?.age_verified && item?.url);
+}
+
+function adultBadge(item) {
+  if (!item?.is_adult) return "";
+  return `<span class="adult-badge">18+</span>`;
+}
+
+function renderPreview(item, size = "card") {
+  const isAdult = Boolean(item.is_adult);
+  const revealed = revealedAdultMedia.has(Number(item.id));
+  const locked = isAdult && !canRevealAdult(item);
+  const blur = isAdult && !revealed && !locked;
+  const placeholderText = locked ? "18+ Verify Age" : "Click To Reveal";
+  const body = locked
+    ? `<div class="locked-preview"><strong>18+</strong><span>Verify age to view</span></div>`
+    : item.media_kind === "video"
+      ? `<video src="${item.url}" ${userSettings().muted_previews ? "muted" : ""} ${userSettings().autoplay_previews ? "autoplay loop" : ""} playsinline preload="metadata"></video>`
+      : `<img src="${item.url}" alt="${escapeHtml(item.title)}" loading="${size === "card" ? "lazy" : "eager"}" />`;
+  return `
+    <span class="${blur ? "adult-blur" : ""}">${body}</span>
+    ${isAdult && !revealed ? `<span class="adult-overlay">${placeholderText}</span>` : ""}
+  `;
 }
 
 function userSettings() {
@@ -202,20 +241,15 @@ function renderMediaGrid() {
   $("empty-state").hidden = mediaItems.length > 0;
   for (const item of mediaItems) {
     const card = document.createElement("article");
-    card.className = "media-card";
+    card.className = `media-card${item.is_adult ? " adult-card" : ""}`;
     const prefs = userSettings();
-    const muted = prefs.muted_previews ? "muted" : "";
-    const autoplay = prefs.autoplay_previews ? "autoplay loop" : "";
-    const preview = item.media_kind === "video"
-      ? `<video src="${item.url}" ${muted} ${autoplay} playsinline preload="metadata"></video>`
-      : `<img src="${item.url}" alt="${escapeHtml(item.title)}" loading="lazy" />`;
     card.innerHTML = `
-      <button class="media-preview" type="button" data-open="${item.id}">${preview}</button>
+      <button class="media-preview" type="button" data-open="${item.id}">${renderPreview(item)}</button>
       <div class="media-info">
         <div class="author-row">
           <div class="avatar tiny" style="border-color:${escapeHtml(item.profile_color || "#37c9a7")}">${item.user_avatar_url ? `<img src="${item.user_avatar_url}" alt="">` : escapeHtml((item.display_name || item.username || "IG").slice(0, 2).toUpperCase())}</div>
           <div>
-          <h2>${escapeHtml(item.title)}</h2>
+          <h2>${adultBadge(item)}${escapeHtml(item.title)}</h2>
           <p class="muted">${escapeHtml(item.category_name)} by ${escapeHtml(item.display_name || item.username)}</p>
           </div>
         </div>
@@ -228,8 +262,8 @@ function renderMediaGrid() {
           <button type="button" data-like="${item.id}">${item.liked_by_me ? "Unlike" : "Like"}</button>
           <button type="button" data-bookmark="${item.id}">${item.bookmarked_by_me ? "Saved" : "Save"}</button>
           <button type="button" data-collect="${item.id}">Collect</button>
-          <button type="button" data-copy="${item.id}">Copy Address</button>
-          <a href="${item.download_url}" ${prefs.open_original_in_new_tab ? 'target="_blank" rel="noopener"' : ""}>Download</a>
+          <button type="button" data-copy="${item.id}" ${item.url ? "" : "disabled"}>Copy Address</button>
+          ${item.download_url ? `<a href="${item.download_url}" ${prefs.open_original_in_new_tab ? 'target="_blank" rel="noopener"' : ""}>Download</a>` : `<button type="button" data-age-gate>Download</button>`}
         </div>
       </div>
     `;
@@ -238,10 +272,19 @@ function renderMediaGrid() {
 }
 
 async function openDetail(id) {
-  const data = await apiFetch(`/api/media/${id}`);
+  let data;
+  try {
+    data = await apiFetch(`/api/media/${id}`);
+  } catch (err) {
+    if (err.status === 403) {
+      openAgeDialog(err.message);
+      return;
+    }
+    throw err;
+  }
   activeDetail = data.media;
   const item = activeDetail;
-  $("detail-title").textContent = item.title;
+  $("detail-title").innerHTML = `${adultBadge(item)}${escapeHtml(item.title)}`;
   $("detail-media").innerHTML = item.media_kind === "video"
     ? `<video src="${item.url}" controls autoplay playsinline></video>`
     : `<img src="${item.url}" alt="${escapeHtml(item.title)}" />`;
@@ -253,7 +296,8 @@ async function openDetail(id) {
   $("detail-tags").innerHTML = (item.tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
   $("detail-like").textContent = item.liked_by_me ? "Unlike" : "Like";
   $("detail-bookmark").textContent = item.bookmarked_by_me ? "Saved" : "Bookmark";
-  $("detail-download").href = item.download_url;
+  $("detail-download").href = item.download_url || "#";
+  $("detail-download").toggleAttribute("aria-disabled", !item.download_url);
   renderComments(data.comments || []);
   if (!$("detail-dialog").open) $("detail-dialog").showModal();
 }
@@ -329,7 +373,7 @@ function renderCollections() {
   list.innerHTML = collectionsState.map((collection) => `
     <article class="collection-card">
       <button type="button" data-collection-open="${collection.id}" class="collection-cover">
-        ${collection.cover_url ? `<img src="${collection.cover_url}" alt="">` : `<span>${escapeHtml(collection.name.slice(0, 2).toUpperCase())}</span>`}
+        ${collection.cover_url ? `<img src="${collection.cover_url}" alt="">` : `<span>${collection.cover_locked ? "18+" : escapeHtml(collection.name.slice(0, 2).toUpperCase())}</span>`}
       </button>
       <div>
         <h3>${escapeHtml(collection.name)}</h3>
@@ -376,8 +420,8 @@ async function openCollection(id) {
     <div class="section-title-row"><h3>${escapeHtml(data.collection.name)}</h3><span class="muted">${media.length} posts</span></div>
     ${media.length ? media.map((item) => `
       <button class="mini-media" type="button" data-open="${item.id}">
-        ${item.media_kind === "video" ? `<video src="${item.url}" muted playsinline preload="metadata"></video>` : `<img src="${item.url}" alt="">`}
-        <span>${escapeHtml(item.title)}</span>
+        ${renderPreview(item, "mini")}
+        <span>${adultBadge(item)}${escapeHtml(item.title)}</span>
       </button>
     `).join("") : `<p class="muted">This collection is empty.</p>`}
   `;
@@ -431,10 +475,10 @@ async function openStudio() {
   $("studio-list").innerHTML = items.length ? items.map((item) => `
     <article class="studio-item">
       <button type="button" data-open="${item.id}" class="studio-thumb">
-        ${item.media_kind === "video" ? `<video src="${item.url}" muted playsinline preload="metadata"></video>` : `<img src="${item.url}" alt="">`}
+        ${renderPreview(item, "mini")}
       </button>
       <div>
-        <h3>${escapeHtml(item.title)}</h3>
+        <h3>${adultBadge(item)}${escapeHtml(item.title)}</h3>
         <p class="muted">${item.views || 0} views · ${item.downloads || 0} downloads · ${item.like_count || 0} likes</p>
       </div>
       <button type="button" data-delete-media="${item.id}">Delete</button>
@@ -479,7 +523,23 @@ async function submitReport(event) {
 async function copyAddress(id) {
   const item = mediaItems.find((entry) => Number(entry.id) === Number(id)) || activeDetail;
   if (!item) return;
+  if (!item.url) return openAgeDialog("Verify your age to copy the address for this 18+ post.");
   await navigator.clipboard.writeText(item.url);
+}
+
+function handleAdultOpen(id) {
+  const item = mediaItems.find((entry) => Number(entry.id) === Number(id)) || activeDetail;
+  if (!item?.is_adult) return false;
+  if (!canRevealAdult(item)) {
+    openAgeDialog("Verify your age to view this 18+ post.");
+    return true;
+  }
+  if (!revealedAdultMedia.has(Number(id))) {
+    revealedAdultMedia.add(Number(id));
+    renderMediaGrid();
+    return true;
+  }
+  return false;
 }
 
 function toggleNewCategory() {
@@ -544,7 +604,33 @@ function fillSettingsForm() {
   $("pref-reduce-motion").checked = Boolean(prefs.reduce_motion);
   $("pref-open-original").checked = Boolean(prefs.open_original_in_new_tab);
   $("pref-blur-video-previews").checked = Boolean(prefs.blur_video_previews);
+  $("settings-age-status").textContent = currentUser.age_verified ? "Verified for 18+ posts" : "Not verified";
   renderAvatar("settings-avatar-preview", currentUser);
+}
+
+async function submitAgeVerification(event) {
+  event.preventDefault();
+  if (!currentUser) return $("auth-dialog").showModal();
+  const inSettings = event.currentTarget.id === "settings-age-save";
+  const birthdate = $(inSettings ? "settings-birthdate" : "age-birthdate").value;
+  const confirmed = $(inSettings ? "settings-age-confirm" : "age-confirm").checked;
+  const noticeId = inSettings ? "settings-error" : "age-error";
+  setNotice(noticeId, "");
+  try {
+    const data = await apiFetch("/api/me/age-verification", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ birthdate, confirm_over_18: confirmed }),
+    });
+    currentUser = data.user;
+    writeStore(USER_KEY, JSON.stringify(currentUser));
+    renderAuth();
+    fillSettingsForm();
+    if ($("age-dialog").open) $("age-dialog").close();
+    await refreshAll();
+  } catch (err) {
+    setNotice(noticeId, err.message);
+  }
 }
 
 async function submitSettings(event) {
@@ -626,6 +712,7 @@ async function submitUpload(event) {
   body.set("title", $("upload-title").value);
   body.set("description", $("upload-description").value);
   body.set("tags", $("upload-tags").value);
+  body.set("is_adult", $("upload-adult").checked ? "true" : "false");
   if ($("upload-category").value) {
     body.set("category_id", $("upload-category").value);
   } else {
@@ -677,6 +764,9 @@ function bindEvents() {
     $("settings-dialog").showModal();
   });
   $("settings-form").addEventListener("submit", submitSettings);
+  $("settings-age-save").addEventListener("click", submitAgeVerification);
+  $("age-verify-form").addEventListener("submit", submitAgeVerification);
+  $("age-close").addEventListener("click", () => $("age-dialog").close());
   $("avatar-save").addEventListener("click", saveAvatar);
   $("upload-open").addEventListener("click", () => currentUser ? $("upload-dialog").showModal() : $("auth-dialog").showModal());
   $("upload-form").addEventListener("submit", submitUpload);
@@ -693,11 +783,13 @@ function bindEvents() {
     const bookmark = event.target.closest("[data-bookmark]");
     const collect = event.target.closest("[data-collect]");
     const copy = event.target.closest("[data-copy]");
-    if (open) await openDetail(open.dataset.open);
+    const ageGate = event.target.closest("[data-age-gate]");
+    if (open && !handleAdultOpen(open.dataset.open)) await openDetail(open.dataset.open);
     if (like) await toggleLike(like.dataset.like);
     if (bookmark) await toggleBookmark(bookmark.dataset.bookmark);
     if (collect) await openCollectionPicker(collect.dataset.collect);
     if (copy) await copyAddress(copy.dataset.copy);
+    if (ageGate) openAgeDialog("Verify your age to download this 18+ post.");
   });
   $("collections-list").addEventListener("click", async (event) => {
     const open = event.target.closest("[data-collection-open]");
@@ -705,12 +797,12 @@ function bindEvents() {
   });
   $("collection-media").addEventListener("click", async (event) => {
     const open = event.target.closest("[data-open]");
-    if (open) await openDetail(open.dataset.open);
+    if (open && !handleAdultOpen(open.dataset.open)) await openDetail(open.dataset.open);
   });
   $("studio-list").addEventListener("click", async (event) => {
     const open = event.target.closest("[data-open]");
     const del = event.target.closest("[data-delete-media]");
-    if (open) await openDetail(open.dataset.open);
+    if (open && !handleAdultOpen(open.dataset.open)) await openDetail(open.dataset.open);
     if (del) await deleteOwnMedia(del.dataset.deleteMedia);
   });
   $("detail-close").addEventListener("click", () => $("detail-dialog").close());

@@ -1,5 +1,6 @@
 import json
 import re
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
@@ -34,8 +35,20 @@ USER_COLUMNS = (
     ("avatar_original_filename", "VARCHAR(255) NULL"),
     ("public_profile", "TINYINT(1) NOT NULL DEFAULT 1"),
     ("show_liked_count", "TINYINT(1) NOT NULL DEFAULT 1"),
+    ("birthdate", "DATE NULL"),
+    ("age_verified_at", "TIMESTAMP NULL DEFAULT NULL"),
+    ("adult_content_consent", "TINYINT(1) NOT NULL DEFAULT 0"),
     ("user_settings", "JSON NULL"),
     ("updated_at", "TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"),
+)
+MEDIA_COLUMNS = (
+    ("is_adult", "TINYINT(1) NOT NULL DEFAULT 0"),
+    ("adult_marked_by_user", "TINYINT(1) NOT NULL DEFAULT 0"),
+    ("adult_marked_by_ai", "TINYINT(1) NOT NULL DEFAULT 0"),
+    ("moderation_status", "VARCHAR(30) NOT NULL DEFAULT 'clear'"),
+    ("moderation_score", "FLOAT NOT NULL DEFAULT 0"),
+    ("moderation_reason", "VARCHAR(300) NULL"),
+    ("moderated_at", "TIMESTAMP NULL DEFAULT NULL"),
 )
 
 
@@ -231,6 +244,7 @@ class GalleryDatabase:
                     """
                 )
         await self.ensure_user_columns()
+        await self.ensure_media_columns()
         await self.seed_default_categories()
 
     async def ensure_user_columns(self) -> None:
@@ -248,6 +262,23 @@ class GalleryDatabase:
                     if name not in existing:
                         await cur.execute(f"ALTER TABLE users ADD COLUMN {name} {definition}")
                 await cur.execute("UPDATE users SET user_settings=%s WHERE user_settings IS NULL", (json.dumps(DEFAULT_USER_SETTINGS),))
+
+    async def ensure_media_columns(self) -> None:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT COLUMN_NAME FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='media_items'
+                    """,
+                    (self.settings.db_schema,),
+                )
+                existing = {row["COLUMN_NAME"] for row in await cur.fetchall()}
+                for name, definition in MEDIA_COLUMNS:
+                    if name not in existing:
+                        await cur.execute(f"ALTER TABLE media_items ADD COLUMN {name} {definition}")
+                if "is_adult" not in existing:
+                    await cur.execute("CREATE INDEX idx_media_adult ON media_items (is_adult, created_at)")
 
     async def seed_default_categories(self) -> None:
         defaults = [
@@ -294,7 +325,8 @@ class GalleryDatabase:
                     """
                     SELECT id, username, display_name, bio, website_url, location_label, profile_color,
                            avatar_path, avatar_mime_type, avatar_original_filename, public_profile,
-                           show_liked_count, user_settings, created_at, updated_at
+                           show_liked_count, birthdate, age_verified_at, adult_content_consent,
+                           user_settings, created_at, updated_at
                     FROM users WHERE id=%s
                     """,
                     (user_id,),
@@ -333,6 +365,19 @@ class GalleryDatabase:
                         fields["show_liked_count"],
                         user_id,
                     ),
+                )
+        return await self.get_user(user_id)
+
+    async def verify_user_age(self, user_id: int, birthdate: date) -> dict[str, Any]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE users
+                    SET birthdate=%s, age_verified_at=CURRENT_TIMESTAMP, adult_content_consent=1
+                    WHERE id=%s
+                    """,
+                    (birthdate.isoformat(), user_id),
                 )
         return await self.get_user(user_id)
 
@@ -421,8 +466,10 @@ class GalleryDatabase:
                 await cur.execute(
                     """
                     INSERT INTO media_items
-                      (user_id, category_id, title, description, tags, media_kind, mime_type, original_filename, storage_path, file_size)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                      (user_id, category_id, title, description, tags, media_kind, mime_type, original_filename,
+                       storage_path, file_size, is_adult, adult_marked_by_user, adult_marked_by_ai,
+                       moderation_status, moderation_score, moderation_reason, moderated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                     """,
                     (
                         item["user_id"],
@@ -435,6 +482,12 @@ class GalleryDatabase:
                         item["original_filename"],
                         item["storage_path"],
                         item["file_size"],
+                        1 if item.get("is_adult") else 0,
+                        1 if item.get("adult_marked_by_user") else 0,
+                        1 if item.get("adult_marked_by_ai") else 0,
+                        item.get("moderation_status") or "clear",
+                        float(item.get("moderation_score") or 0),
+                        item.get("moderation_reason"),
                     ),
                 )
                 return await self.get_media(cur.lastrowid, item["user_id"])
@@ -734,7 +787,8 @@ class GalleryDatabase:
                     SELECT mc.*, u.username, u.display_name, u.avatar_path AS user_avatar_path,
                            COUNT(mci.media_id) AS item_count,
                            MAX(mi.storage_path) AS cover_path,
-                           MAX(mi.media_kind) AS cover_media_kind
+                           MAX(mi.media_kind) AS cover_media_kind,
+                           MAX(CASE WHEN mi.is_adult=1 THEN 1 ELSE 0 END) AS cover_is_adult
                     FROM media_collections mc
                     JOIN users u ON u.id = mc.user_id
                     LEFT JOIN media_collection_items mci ON mci.collection_id = mc.id
@@ -756,7 +810,8 @@ class GalleryDatabase:
                     SELECT mc.*, u.username, u.display_name, u.avatar_path AS user_avatar_path,
                            COUNT(mci.media_id) AS item_count,
                            MAX(mi.storage_path) AS cover_path,
-                           MAX(mi.media_kind) AS cover_media_kind
+                           MAX(mi.media_kind) AS cover_media_kind,
+                           MAX(CASE WHEN mi.is_adult=1 THEN 1 ELSE 0 END) AS cover_is_adult
                     FROM media_collections mc
                     JOIN users u ON u.id = mc.user_id
                     LEFT JOIN media_collection_items mci ON mci.collection_id = mc.id
@@ -854,6 +909,9 @@ class GalleryDatabase:
             row["tags"] = []
         row["liked_by_me"] = bool(row.get("liked_by_me"))
         row["bookmarked_by_me"] = bool(row.get("bookmarked_by_me"))
+        row["is_adult"] = bool(row.get("is_adult"))
+        row["adult_marked_by_user"] = bool(row.get("adult_marked_by_user"))
+        row["adult_marked_by_ai"] = bool(row.get("adult_marked_by_ai"))
         for key in ("like_count", "comment_count", "views", "downloads", "file_size"):
             if isinstance(row.get(key), Decimal):
                 row[key] = int(row[key])
@@ -872,10 +930,13 @@ class GalleryDatabase:
         user["user_settings"] = settings
         user["public_profile"] = bool(user.get("public_profile"))
         user["show_liked_count"] = bool(user.get("show_liked_count"))
+        user["adult_content_consent"] = bool(user.get("adult_content_consent"))
+        user["age_verified"] = bool(user.get("age_verified_at"))
         return user
 
     def _decode_collection(self, row: dict[str, Any]) -> dict[str, Any]:
         row["is_public"] = bool(row.get("is_public"))
+        row["cover_is_adult"] = bool(row.get("cover_is_adult"))
         for key in ("item_count",):
             if isinstance(row.get(key), Decimal):
                 row[key] = int(row[key])

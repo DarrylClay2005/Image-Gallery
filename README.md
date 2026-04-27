@@ -8,6 +8,8 @@ FastAPI and MySQL gallery for wallpapers, profile pictures, memes, GIFs, and vid
 - Pick an existing category or create a new category while uploading.
 - Browse by media type, category, search text, newest, likes, or downloads.
 - Like posts, comment on posts, copy direct media addresses, and download files.
+- Uploaders can mark posts as 18+, and automatic moderation flags likely adult uploads from filenames, titles, descriptions, tags, and MIME metadata.
+- 18+ posts require account age verification; previews stay blurred or locked until a verified user chooses to reveal them.
 - Private per-account settings for theme, accent color, grid density, default sort, preview behavior, reduced motion, and original-link behavior.
 - Public profile controls for circular avatar, display name, bio, website, location label, profile color, and profile visibility.
 - Save/bookmark media to a private account list.

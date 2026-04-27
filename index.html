@@ -286,8 +286,44 @@
           <label><input id="pref-blur-video-previews" type="checkbox" /> Blur video previews</label>
         </div>
       </section>
+      <section class="settings-section">
+        <h3>18+ Access</h3>
+        <p id="settings-age-status" class="muted">Not verified</p>
+        <div class="form-grid">
+          <label class="field">
+            <span>Birthdate</span>
+            <input id="settings-birthdate" type="date" />
+          </label>
+          <label class="check-card">
+            <input id="settings-age-confirm" type="checkbox" />
+            <span>I confirm I am 18 or older.</span>
+          </label>
+        </div>
+        <button id="settings-age-save" type="button">Verify Age</button>
+      </section>
       <div class="modal-actions">
         <button class="primary" type="submit">Save Settings</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="age-dialog" class="modal">
+    <form method="dialog" class="modal-shell" id="age-verify-form">
+      <div class="modal-head">
+        <h2>Age Verification</h2>
+        <button id="age-close" class="icon-button" type="button" aria-label="Close">X</button>
+      </div>
+      <div id="age-error" class="notice error" hidden></div>
+      <label class="field">
+        <span>Birthdate</span>
+        <input id="age-birthdate" type="date" required />
+      </label>
+      <label class="check-card">
+        <input id="age-confirm" type="checkbox" required />
+        <span>I confirm I am 18 or older and want to unlock 18+ posts.</span>
+      </label>
+      <div class="modal-actions">
+        <button class="primary" type="submit">Verify</button>
       </div>
     </form>
   </dialog>
@@ -332,6 +368,10 @@
       <label class="field">
         <span>Tags</span>
         <input id="upload-tags" name="tags" placeholder="neon, funny, anime, desktop" />
+      </label>
+      <label class="check-card">
+        <input id="upload-adult" name="is_adult" type="checkbox" />
+        <span>Mark this upload as 18+</span>
       </label>
       <div class="modal-actions">
         <button class="primary" type="submit">Post</button>
