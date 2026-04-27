@@ -186,6 +186,50 @@ class GalleryDatabase:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """
                 )
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS media_collections (
+                      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                      user_id BIGINT UNSIGNED NOT NULL,
+                      name VARCHAR(100) NOT NULL,
+                      description VARCHAR(500) NULL,
+                      is_public TINYINT(1) NOT NULL DEFAULT 1,
+                      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                      KEY idx_collections_user (user_id, created_at),
+                      CONSTRAINT fk_collections_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS media_collection_items (
+                      collection_id BIGINT UNSIGNED NOT NULL,
+                      media_id BIGINT UNSIGNED NOT NULL,
+                      added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      PRIMARY KEY (collection_id, media_id),
+                      CONSTRAINT fk_collection_items_collection FOREIGN KEY (collection_id) REFERENCES media_collections(id) ON DELETE CASCADE,
+                      CONSTRAINT fk_collection_items_media FOREIGN KEY (media_id) REFERENCES media_items(id) ON DELETE CASCADE
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS media_reports (
+                      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                      media_id BIGINT UNSIGNED NOT NULL,
+                      user_id BIGINT UNSIGNED NOT NULL,
+                      reason VARCHAR(80) NOT NULL,
+                      details VARCHAR(500) NULL,
+                      status ENUM('open','reviewed','dismissed') NOT NULL DEFAULT 'open',
+                      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      UNIQUE KEY uniq_report_once (media_id, user_id),
+                      KEY idx_reports_media (media_id, created_at),
+                      CONSTRAINT fk_reports_media FOREIGN KEY (media_id) REFERENCES media_items(id) ON DELETE CASCADE,
+                      CONSTRAINT fk_reports_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
         await self.ensure_user_columns()
         await self.seed_default_categories()
 
@@ -457,6 +501,66 @@ class GalleryDatabase:
                 )
                 return [self._decode_media(row) for row in await cur.fetchall()]
 
+    async def list_user_media(self, user_id: int, limit: int = 100) -> list[dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT m.*, c.name AS category_name, c.slug AS category_slug,
+                           u.username, u.display_name, u.bio AS user_bio, u.website_url AS user_website_url,
+                           u.avatar_path AS user_avatar_path, u.profile_color, u.public_profile,
+                           COUNT(DISTINCT l.user_id) AS like_count,
+                           COUNT(DISTINCT cm.id) AS comment_count,
+                           MAX(CASE WHEN b.user_id IS NULL THEN 0 ELSE 1 END) AS bookmarked_by_me,
+                           MAX(CASE WHEN l2.user_id IS NULL THEN 0 ELSE 1 END) AS liked_by_me
+                    FROM media_items m
+                    JOIN categories c ON c.id = m.category_id
+                    JOIN users u ON u.id = m.user_id
+                    LEFT JOIN media_likes l ON l.media_id = m.id
+                    LEFT JOIN media_likes l2 ON l2.media_id = m.id AND l2.user_id = %s
+                    LEFT JOIN media_bookmarks b ON b.media_id = m.id AND b.user_id = %s
+                    LEFT JOIN media_comments cm ON cm.media_id = m.id
+                    WHERE m.user_id=%s
+                    GROUP BY m.id
+                    ORDER BY m.created_at DESC
+                    LIMIT %s
+                    """,
+                    (user_id, user_id, user_id, max(1, min(limit, 200))),
+                )
+                return [self._decode_media(row) for row in await cur.fetchall()]
+
+    async def random_media(self, viewer_id: int | None = None) -> dict[str, Any] | None:
+        items = await self.list_media(viewer_id=viewer_id, sort="new", limit=100)
+        if not items:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT id FROM media_items ORDER BY RAND() LIMIT 1")
+                row = await cur.fetchone()
+        return await self.get_media(int(row["id"]), viewer_id) if row else items[0]
+
+    async def tag_cloud(self, limit: int = 30) -> list[dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT tags FROM media_items WHERE tags IS NOT NULL ORDER BY created_at DESC LIMIT 500")
+                rows = await cur.fetchall()
+        counts: dict[str, int] = {}
+        for row in rows:
+            tags = row.get("tags")
+            if isinstance(tags, str):
+                try:
+                    tags = json.loads(tags)
+                except json.JSONDecodeError:
+                    tags = []
+            for tag in tags or []:
+                normalized = str(tag).strip()[:32]
+                if normalized:
+                    counts[normalized] = counts.get(normalized, 0) + 1
+        return [
+            {"tag": tag, "count": count}
+            for tag, count in sorted(counts.items(), key=lambda item: (-item[1], item[0].lower()))[:limit]
+        ]
+
     async def get_media(self, media_id: int, viewer_id: int | None = None) -> dict[str, Any] | None:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
@@ -565,6 +669,15 @@ class GalleryDatabase:
                     await cur.execute("DELETE FROM media_bookmarks WHERE user_id=%s AND media_id=%s", (user_id, media_id))
         return await self.get_media(media_id, user_id)
 
+    async def delete_media(self, media_id: int, user_id: int) -> dict[str, Any] | None:
+        item = await self.get_media(media_id, user_id)
+        if not item or int(item["user_id"]) != int(user_id):
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("DELETE FROM media_items WHERE id=%s AND user_id=%s", (media_id, user_id))
+        return item
+
     async def list_bookmarks(self, user_id: int, limit: int = 80) -> list[dict[str, Any]]:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
@@ -592,6 +705,143 @@ class GalleryDatabase:
                     (user_id, user_id, max(1, min(limit, 100))),
                 )
                 return [self._decode_media(row) for row in await cur.fetchall()]
+
+    async def create_collection(self, user_id: int, name: str, description: str | None, is_public: bool) -> dict[str, Any]:
+        name = self._clean_text(name, 100, required=True)
+        description = self._clean_text(description, 500)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    "INSERT INTO media_collections (user_id, name, description, is_public) VALUES (%s, %s, %s, %s)",
+                    (user_id, name, description, 1 if is_public else 0),
+                )
+                return await self.get_collection(cur.lastrowid, user_id)
+
+    async def list_collections(self, viewer_id: int | None = None, mine: bool = False) -> list[dict[str, Any]]:
+        clauses = []
+        params: list[Any] = []
+        if mine:
+            clauses.append("mc.user_id=%s")
+            params.append(viewer_id or 0)
+        else:
+            clauses.append("(mc.is_public=1 OR mc.user_id=%s)")
+            params.append(viewer_id or 0)
+        where = f"WHERE {' AND '.join(clauses)}"
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    f"""
+                    SELECT mc.*, u.username, u.display_name, u.avatar_path AS user_avatar_path,
+                           COUNT(mci.media_id) AS item_count,
+                           MAX(mi.storage_path) AS cover_path,
+                           MAX(mi.media_kind) AS cover_media_kind
+                    FROM media_collections mc
+                    JOIN users u ON u.id = mc.user_id
+                    LEFT JOIN media_collection_items mci ON mci.collection_id = mc.id
+                    LEFT JOIN media_items mi ON mi.id = mci.media_id
+                    {where}
+                    GROUP BY mc.id
+                    ORDER BY mc.updated_at DESC, mc.created_at DESC
+                    LIMIT 100
+                    """,
+                    tuple(params),
+                )
+                return [self._decode_collection(row) for row in await cur.fetchall()]
+
+    async def get_collection(self, collection_id: int, viewer_id: int | None = None) -> dict[str, Any] | None:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT mc.*, u.username, u.display_name, u.avatar_path AS user_avatar_path,
+                           COUNT(mci.media_id) AS item_count,
+                           MAX(mi.storage_path) AS cover_path,
+                           MAX(mi.media_kind) AS cover_media_kind
+                    FROM media_collections mc
+                    JOIN users u ON u.id = mc.user_id
+                    LEFT JOIN media_collection_items mci ON mci.collection_id = mc.id
+                    LEFT JOIN media_items mi ON mi.id = mci.media_id
+                    WHERE mc.id=%s AND (mc.is_public=1 OR mc.user_id=%s)
+                    GROUP BY mc.id
+                    """,
+                    (collection_id, viewer_id or 0),
+                )
+                row = await cur.fetchone()
+                return self._decode_collection(row) if row else None
+
+    async def set_collection_item(self, collection_id: int, media_id: int, user_id: int, saved: bool) -> dict[str, Any] | None:
+        collection = await self.get_collection(collection_id, user_id)
+        if not collection or int(collection["user_id"]) != int(user_id):
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                if saved:
+                    await cur.execute(
+                        "INSERT IGNORE INTO media_collection_items (collection_id, media_id) VALUES (%s, %s)",
+                        (collection_id, media_id),
+                    )
+                else:
+                    await cur.execute(
+                        "DELETE FROM media_collection_items WHERE collection_id=%s AND media_id=%s",
+                        (collection_id, media_id),
+                    )
+                await cur.execute("UPDATE media_collections SET updated_at=CURRENT_TIMESTAMP WHERE id=%s", (collection_id,))
+        return await self.get_collection(collection_id, user_id)
+
+    async def list_collection_media(self, collection_id: int, viewer_id: int | None = None) -> list[dict[str, Any]]:
+        collection = await self.get_collection(collection_id, viewer_id)
+        if not collection:
+            return []
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT m.*, c.name AS category_name, c.slug AS category_slug,
+                           u.username,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.display_name ELSE u.username END AS display_name,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.bio ELSE NULL END AS user_bio,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.website_url ELSE NULL END AS user_website_url,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.avatar_path ELSE NULL END AS user_avatar_path,
+                           u.profile_color, u.public_profile,
+                           COUNT(DISTINCT l.user_id) AS like_count,
+                           COUNT(DISTINCT cm.id) AS comment_count,
+                           MAX(CASE WHEN b.user_id IS NULL THEN 0 ELSE 1 END) AS bookmarked_by_me,
+                           MAX(CASE WHEN l2.user_id IS NULL THEN 0 ELSE 1 END) AS liked_by_me
+                    FROM media_collection_items mci
+                    JOIN media_items m ON m.id = mci.media_id
+                    JOIN categories c ON c.id = m.category_id
+                    JOIN users u ON u.id = m.user_id
+                    LEFT JOIN media_likes l ON l.media_id = m.id
+                    LEFT JOIN media_likes l2 ON l2.media_id = m.id AND l2.user_id = %s
+                    LEFT JOIN media_bookmarks b ON b.media_id = m.id AND b.user_id = %s
+                    LEFT JOIN media_comments cm ON cm.media_id = m.id
+                    WHERE mci.collection_id=%s
+                    GROUP BY m.id, mci.added_at
+                    ORDER BY mci.added_at DESC
+                    LIMIT 120
+                    """,
+                    (viewer_id or 0, viewer_id or 0, viewer_id or 0, viewer_id or 0, viewer_id or 0, viewer_id or 0, collection_id),
+                )
+                return [self._decode_media(row) for row in await cur.fetchall()]
+
+    async def report_media(self, media_id: int, user_id: int, reason: str, details: str | None) -> dict[str, Any]:
+        reason = self._clean_text(reason, 80, required=True)
+        details = self._clean_text(details, 500)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO media_reports (media_id, user_id, reason, details)
+                    VALUES (%s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE reason=VALUES(reason), details=VALUES(details), status='open', created_at=CURRENT_TIMESTAMP
+                    """,
+                    (media_id, user_id, reason, details),
+                )
+                await cur.execute(
+                    "SELECT * FROM media_reports WHERE media_id=%s AND user_id=%s",
+                    (media_id, user_id),
+                )
+                return await cur.fetchone()
 
     def _decode_media(self, row: dict[str, Any]) -> dict[str, Any]:
         tags = row.get("tags")
@@ -623,6 +873,13 @@ class GalleryDatabase:
         user["public_profile"] = bool(user.get("public_profile"))
         user["show_liked_count"] = bool(user.get("show_liked_count"))
         return user
+
+    def _decode_collection(self, row: dict[str, Any]) -> dict[str, Any]:
+        row["is_public"] = bool(row.get("is_public"))
+        for key in ("item_count",):
+            if isinstance(row.get(key), Decimal):
+                row[key] = int(row[key])
+        return row
 
     def _clean_text(self, value: Any, max_length: int, required: bool = False) -> str | None:
         text = " ".join(str(value or "").strip().split())

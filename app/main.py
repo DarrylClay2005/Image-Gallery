@@ -80,6 +80,22 @@ class BookmarkRequest(BaseModel):
     bookmarked: bool = True
 
 
+class CollectionRequest(BaseModel):
+    name: str
+    description: str | None = None
+    is_public: bool = True
+
+
+class CollectionItemRequest(BaseModel):
+    media_id: int
+    saved: bool = True
+
+
+class ReportRequest(BaseModel):
+    reason: str
+    details: str | None = None
+
+
 def _jsonable(value: Any) -> Any:
     if isinstance(value, list):
         return [_jsonable(item) for item in value]
@@ -126,6 +142,17 @@ def _with_user_urls(request: Request, user: dict[str, Any] | None) -> dict[str, 
     clone = dict(user)
     if clone.get("avatar_path"):
         clone["avatar_url"] = _public_url(request, clone["avatar_path"])
+    return _jsonable(clone)
+
+
+def _with_collection_urls(request: Request, collection: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not collection:
+        return None
+    clone = dict(collection)
+    if clone.get("cover_path"):
+        clone["cover_url"] = _public_url(request, clone["cover_path"])
+    if clone.get("user_avatar_path"):
+        clone["user_avatar_url"] = _public_url(request, clone["user_avatar_path"])
     return _jsonable(clone)
 
 
@@ -302,6 +329,13 @@ async def my_bookmarks(request: Request) -> dict[str, Any]:
     return {"media": [_with_urls(request, item) for item in items]}
 
 
+@app.get("/api/me/media")
+async def my_media(request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    items = await db.list_user_media(int(auth["id"]))
+    return {"media": [_with_urls(request, item) for item in items]}
+
+
 @app.get("/api/categories")
 async def categories() -> dict[str, Any]:
     return {"categories": _jsonable(await db.list_categories())}
@@ -338,6 +372,61 @@ async def media(
         offset=offset,
     )
     return {"media": [_with_urls(request, item) for item in items]}
+
+
+@app.get("/api/media/random")
+async def random_media(request: Request) -> dict[str, Any]:
+    viewer_id = _user_id(_auth_optional(request))
+    item = await db.random_media(viewer_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="No media has been uploaded yet.")
+    return {"media": _with_urls(request, item)}
+
+
+@app.get("/api/tags")
+async def tags() -> dict[str, Any]:
+    return {"tags": _jsonable(await db.tag_cloud())}
+
+
+@app.get("/api/collections")
+async def collections(request: Request, mine: bool = False) -> dict[str, Any]:
+    viewer_id = _user_id(_auth_optional(request))
+    if mine and not viewer_id:
+        raise HTTPException(status_code=401, detail="Login required")
+    rows = await db.list_collections(viewer_id=viewer_id, mine=mine)
+    return {"collections": [_with_collection_urls(request, row) for row in rows]}
+
+
+@app.post("/api/collections")
+async def create_collection(payload: CollectionRequest, request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    try:
+        collection = await db.create_collection(int(auth["id"]), payload.name, payload.description, payload.is_public)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return {"collection": _with_collection_urls(request, collection)}
+
+
+@app.get("/api/collections/{collection_id}")
+async def collection_detail(collection_id: int, request: Request) -> dict[str, Any]:
+    viewer_id = _user_id(_auth_optional(request))
+    collection = await db.get_collection(collection_id, viewer_id)
+    if not collection:
+        raise HTTPException(status_code=404, detail="Collection not found.")
+    items = await db.list_collection_media(collection_id, viewer_id)
+    return {
+        "collection": _with_collection_urls(request, collection),
+        "media": [_with_urls(request, item) for item in items],
+    }
+
+
+@app.post("/api/collections/{collection_id}/items")
+async def save_collection_item(collection_id: int, payload: CollectionItemRequest, request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    collection = await db.set_collection_item(collection_id, payload.media_id, int(auth["id"]), payload.saved)
+    if not collection:
+        raise HTTPException(status_code=404, detail="Collection not found.")
+    return {"collection": _with_collection_urls(request, collection)}
 
 
 @app.post("/api/media")
@@ -416,6 +505,30 @@ async def add_comment(media_id: int, payload: CommentRequest, request: Request) 
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     return {"comment": _jsonable(comment)}
+
+
+@app.post("/api/media/{media_id}/report")
+async def report_media(media_id: int, payload: ReportRequest, request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    if not await db.get_media(media_id, int(auth["id"])):
+        raise HTTPException(status_code=404, detail="Media not found.")
+    try:
+        report = await db.report_media(media_id, int(auth["id"]), payload.reason, payload.details)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return {"report": _jsonable(report)}
+
+
+@app.delete("/api/media/{media_id}")
+async def delete_media(media_id: int, request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    item = await db.delete_media(media_id, int(auth["id"]))
+    if not item:
+        raise HTTPException(status_code=404, detail="Media not found.")
+    path = (settings.uploads_dir / item["storage_path"]).resolve()
+    if str(path).startswith(str(settings.uploads_dir.resolve())):
+        path.unlink(missing_ok=True)
+    return {"deleted": True}
 
 
 @app.get("/api/media/{media_id}/download", name="download_media")

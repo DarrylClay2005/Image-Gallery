@@ -15,6 +15,9 @@
     </a>
     <div class="topbar-actions">
       <span id="connection-status" class="status-pill">Connecting</span>
+      <button id="surprise-open" type="button">Surprise</button>
+      <button id="collections-open" type="button">Collections</button>
+      <button id="studio-open" type="button" hidden>Studio</button>
       <button id="upload-open" class="primary" type="button">Upload</button>
       <button id="settings-open" type="button" hidden>Settings</button>
       <button id="auth-open" type="button">Login</button>
@@ -58,6 +61,13 @@
         <div><strong id="stat-likes">0</strong><span>Likes</span></div>
         <div><strong id="stat-users">0</strong><span>Users</span></div>
         <div><strong id="stat-bytes">0 MB</strong><span>Stored</span></div>
+      </div>
+      <div class="sidebar-block tag-panel">
+        <div class="side-title-row">
+          <strong>Tags</strong>
+          <button id="clear-tag" type="button">Clear</button>
+        </div>
+        <div id="tag-cloud" class="tag-cloud"></div>
       </div>
       <div id="account-card" class="account-card" hidden>
         <div id="account-avatar" class="avatar">IG</div>
@@ -106,6 +116,84 @@
       <div class="modal-actions">
         <button id="auth-submit" class="primary" type="submit">Login</button>
         <button id="auth-toggle" type="button">Create Account</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="collections-dialog" class="modal">
+    <div class="modal-shell wide">
+      <div class="modal-head">
+        <h2>Collections</h2>
+        <button id="collections-close" class="icon-button" type="button" aria-label="Close">X</button>
+      </div>
+      <div id="collections-error" class="notice error" hidden></div>
+      <form id="collection-form" class="collection-form">
+        <input id="collection-name" maxlength="100" placeholder="New collection name" />
+        <input id="collection-description" maxlength="500" placeholder="Description" />
+        <label><input id="collection-public" type="checkbox" checked /> Public</label>
+        <button class="primary" type="submit">Create</button>
+      </form>
+      <div id="collections-list" class="collection-list"></div>
+      <div id="collection-media" class="mini-media-grid"></div>
+    </div>
+  </dialog>
+
+  <dialog id="studio-dialog" class="modal">
+    <div class="modal-shell wide">
+      <div class="modal-head">
+        <h2>Creator Studio</h2>
+        <button id="studio-close" class="icon-button" type="button" aria-label="Close">X</button>
+      </div>
+      <div class="studio-summary">
+        <div><strong id="studio-posts">0</strong><span>Posts</span></div>
+        <div><strong id="studio-views">0</strong><span>Views</span></div>
+        <div><strong id="studio-downloads">0</strong><span>Downloads</span></div>
+        <div><strong id="studio-likes">0</strong><span>Likes</span></div>
+      </div>
+      <div id="studio-list" class="studio-list"></div>
+    </div>
+  </dialog>
+
+  <dialog id="collection-picker-dialog" class="modal">
+    <form method="dialog" class="modal-shell" id="collection-picker-form">
+      <div class="modal-head">
+        <h2>Add To Collection</h2>
+        <button class="icon-button" value="cancel" type="submit" aria-label="Close">X</button>
+      </div>
+      <div id="collection-picker-error" class="notice error" hidden></div>
+      <label class="field">
+        <span>Collection</span>
+        <select id="collection-picker-select"></select>
+      </label>
+      <div class="modal-actions">
+        <button class="primary" type="submit">Add</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="report-dialog" class="modal">
+    <form method="dialog" class="modal-shell" id="report-form">
+      <div class="modal-head">
+        <h2>Report Media</h2>
+        <button class="icon-button" value="cancel" type="submit" aria-label="Close">X</button>
+      </div>
+      <div id="report-error" class="notice error" hidden></div>
+      <label class="field">
+        <span>Reason</span>
+        <select id="report-reason">
+          <option value="Spam">Spam</option>
+          <option value="Copyright concern">Copyright concern</option>
+          <option value="Unsafe content">Unsafe content</option>
+          <option value="Wrong category">Wrong category</option>
+          <option value="Other">Other</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Details</span>
+        <textarea id="report-details" maxlength="500" rows="3"></textarea>
+      </label>
+      <div class="modal-actions">
+        <button class="primary" type="submit">Send Report</button>
       </div>
     </form>
   </dialog>
@@ -266,6 +354,8 @@
           <div class="action-row">
             <button id="detail-like" type="button">Like</button>
             <button id="detail-bookmark" type="button">Bookmark</button>
+            <button id="detail-collect" type="button">Collect</button>
+            <button id="detail-report" type="button">Report</button>
             <button id="detail-copy" type="button">Copy Address</button>
             <a id="detail-download" class="button-link" href="#">Download</a>
           </div>

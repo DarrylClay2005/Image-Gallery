@@ -22,7 +22,10 @@ let token = readStore(TOKEN_KEY);
 let currentUser = readJsonStore(USER_KEY);
 let categories = [];
 let mediaItems = [];
+let collectionsState = [];
 let activeDetail = null;
+let selectedCollectionMediaId = null;
+let selectedReportMediaId = null;
 let registerMode = false;
 
 const $ = (id) => document.getElementById(id);
@@ -80,6 +83,7 @@ function renderAuth() {
   $("auth-open").textContent = currentUser ? currentUser.display_name || currentUser.username : "Login";
   $("logout").hidden = !currentUser;
   $("settings-open").hidden = !currentUser;
+  $("studio-open").hidden = !currentUser;
   $("account-card").hidden = !currentUser;
   if (currentUser) {
     $("account-name").textContent = currentUser.display_name || currentUser.username;
@@ -140,8 +144,16 @@ async function initApiOrigin() {
 }
 
 async function refreshAll() {
-  await Promise.all([loadCategories(), loadStats()]);
+  await Promise.all([loadCategories(), loadStats(), loadTags()]);
   await loadMedia();
+}
+
+async function loadTags() {
+  const data = await apiFetch("/api/tags");
+  const tags = data.tags || [];
+  $("tag-cloud").innerHTML = tags.length ? tags.map((item) => (
+    `<button type="button" data-tag="${escapeHtml(item.tag)}">${escapeHtml(item.tag)} <span>${item.count}</span></button>`
+  )).join("") : `<span class="muted">No tags yet</span>`;
 }
 
 async function loadCategories() {
@@ -215,6 +227,7 @@ function renderMediaGrid() {
         <div class="card-actions">
           <button type="button" data-like="${item.id}">${item.liked_by_me ? "Unlike" : "Like"}</button>
           <button type="button" data-bookmark="${item.id}">${item.bookmarked_by_me ? "Saved" : "Save"}</button>
+          <button type="button" data-collect="${item.id}">Collect</button>
           <button type="button" data-copy="${item.id}">Copy Address</button>
           <a href="${item.download_url}" ${prefs.open_original_in_new_tab ? 'target="_blank" rel="noopener"' : ""}>Download</a>
         </div>
@@ -293,6 +306,174 @@ async function toggleLike(id, liked = null) {
     $("detail-meta").textContent = `${updated.category_name} by ${updated.display_name || updated.username} - ${formatBytes(updated.file_size)} - ${updated.like_count || 0} likes`;
   }
   await loadStats();
+}
+
+async function openSurprise() {
+  const data = await apiFetch("/api/media/random");
+  if (data.media?.id) await openDetail(data.media.id);
+}
+
+async function loadCollections(mine = false) {
+  const data = await apiFetch(`/api/collections${mine ? "?mine=true" : ""}`);
+  collectionsState = data.collections || [];
+  renderCollections();
+  return collectionsState;
+}
+
+function renderCollections() {
+  const list = $("collections-list");
+  if (!collectionsState.length) {
+    list.innerHTML = `<p class="muted">No collections yet.</p>`;
+    return;
+  }
+  list.innerHTML = collectionsState.map((collection) => `
+    <article class="collection-card">
+      <button type="button" data-collection-open="${collection.id}" class="collection-cover">
+        ${collection.cover_url ? `<img src="${collection.cover_url}" alt="">` : `<span>${escapeHtml(collection.name.slice(0, 2).toUpperCase())}</span>`}
+      </button>
+      <div>
+        <h3>${escapeHtml(collection.name)}</h3>
+        <p class="muted">${escapeHtml(collection.description || "No description")} · ${collection.item_count || 0} posts · ${collection.is_public ? "Public" : "Private"}</p>
+        <p class="muted">by ${escapeHtml(collection.display_name || collection.username || "Unknown")}</p>
+      </div>
+    </article>
+  `).join("");
+}
+
+async function openCollectionsDialog() {
+  setNotice("collections-error", "");
+  $("collection-media").innerHTML = "";
+  $("collections-dialog").showModal();
+  await loadCollections(false);
+}
+
+async function createCollection(event) {
+  event.preventDefault();
+  if (!currentUser) return $("auth-dialog").showModal();
+  setNotice("collections-error", "");
+  try {
+    await apiFetch("/api/collections", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: $("collection-name").value,
+        description: $("collection-description").value,
+        is_public: $("collection-public").checked,
+      }),
+    });
+    $("collection-form").reset();
+    $("collection-public").checked = true;
+    await loadCollections(false);
+  } catch (err) {
+    setNotice("collections-error", err.message);
+  }
+}
+
+async function openCollection(id) {
+  const data = await apiFetch(`/api/collections/${id}`);
+  const media = data.media || [];
+  $("collection-media").innerHTML = `
+    <div class="section-title-row"><h3>${escapeHtml(data.collection.name)}</h3><span class="muted">${media.length} posts</span></div>
+    ${media.length ? media.map((item) => `
+      <button class="mini-media" type="button" data-open="${item.id}">
+        ${item.media_kind === "video" ? `<video src="${item.url}" muted playsinline preload="metadata"></video>` : `<img src="${item.url}" alt="">`}
+        <span>${escapeHtml(item.title)}</span>
+      </button>
+    `).join("") : `<p class="muted">This collection is empty.</p>`}
+  `;
+}
+
+async function openCollectionPicker(mediaId) {
+  if (!currentUser) return $("auth-dialog").showModal();
+  selectedCollectionMediaId = mediaId;
+  setNotice("collection-picker-error", "");
+  const collections = await loadCollections(true);
+  $("collection-picker-select").innerHTML = collections.map((collection) => (
+    `<option value="${collection.id}">${escapeHtml(collection.name)}</option>`
+  )).join("");
+  if (!collections.length) {
+    setNotice("collection-picker-error", "Create a collection first.");
+  }
+  $("collection-picker-dialog").showModal();
+}
+
+async function addToCollection(event) {
+  event.preventDefault();
+  if (!selectedCollectionMediaId) return;
+  const collectionId = $("collection-picker-select").value;
+  if (!collectionId) return setNotice("collection-picker-error", "Choose a collection first.");
+  try {
+    await apiFetch(`/api/collections/${collectionId}/items`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ media_id: Number(selectedCollectionMediaId), saved: true }),
+    });
+    $("collection-picker-dialog").close();
+  } catch (err) {
+    setNotice("collection-picker-error", err.message);
+  }
+}
+
+async function openStudio() {
+  if (!currentUser) return $("auth-dialog").showModal();
+  const data = await apiFetch("/api/me/media");
+  const items = data.media || [];
+  const totals = items.reduce((acc, item) => {
+    acc.views += Number(item.views || 0);
+    acc.downloads += Number(item.downloads || 0);
+    acc.likes += Number(item.like_count || 0);
+    return acc;
+  }, { views: 0, downloads: 0, likes: 0 });
+  $("studio-posts").textContent = items.length;
+  $("studio-views").textContent = totals.views;
+  $("studio-downloads").textContent = totals.downloads;
+  $("studio-likes").textContent = totals.likes;
+  $("studio-list").innerHTML = items.length ? items.map((item) => `
+    <article class="studio-item">
+      <button type="button" data-open="${item.id}" class="studio-thumb">
+        ${item.media_kind === "video" ? `<video src="${item.url}" muted playsinline preload="metadata"></video>` : `<img src="${item.url}" alt="">`}
+      </button>
+      <div>
+        <h3>${escapeHtml(item.title)}</h3>
+        <p class="muted">${item.views || 0} views · ${item.downloads || 0} downloads · ${item.like_count || 0} likes</p>
+      </div>
+      <button type="button" data-delete-media="${item.id}">Delete</button>
+    </article>
+  `).join("") : `<p class="muted">You have not uploaded anything yet.</p>`;
+  $("studio-dialog").showModal();
+}
+
+async function deleteOwnMedia(id) {
+  if (!confirm("Delete this post permanently?")) return;
+  await apiFetch(`/api/media/${id}`, { method: "DELETE" });
+  await openStudio();
+  await refreshAll();
+}
+
+function openReport(mediaId) {
+  if (!currentUser) return $("auth-dialog").showModal();
+  selectedReportMediaId = mediaId;
+  setNotice("report-error", "");
+  $("report-dialog").showModal();
+}
+
+async function submitReport(event) {
+  event.preventDefault();
+  if (!selectedReportMediaId) return;
+  try {
+    await apiFetch(`/api/media/${selectedReportMediaId}/report`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        reason: $("report-reason").value,
+        details: $("report-details").value,
+      }),
+    });
+    $("report-form").reset();
+    $("report-dialog").close();
+  } catch (err) {
+    setNotice("report-error", err.message);
+  }
 }
 
 async function copyAddress(id) {
@@ -473,6 +654,24 @@ function bindEvents() {
   });
   $("auth-toggle").addEventListener("click", () => setRegisterMode(!registerMode));
   $("auth-form").addEventListener("submit", submitAuth);
+  $("surprise-open").addEventListener("click", openSurprise);
+  $("collections-open").addEventListener("click", openCollectionsDialog);
+  $("collections-close").addEventListener("click", () => $("collections-dialog").close());
+  $("collection-form").addEventListener("submit", createCollection);
+  $("collection-picker-form").addEventListener("submit", addToCollection);
+  $("studio-open").addEventListener("click", openStudio);
+  $("studio-close").addEventListener("click", () => $("studio-dialog").close());
+  $("report-form").addEventListener("submit", submitReport);
+  $("clear-tag").addEventListener("click", () => {
+    $("search").value = "";
+    loadMedia();
+  });
+  $("tag-cloud").addEventListener("click", (event) => {
+    const tagButton = event.target.closest("[data-tag]");
+    if (!tagButton) return;
+    $("search").value = tagButton.dataset.tag;
+    loadMedia();
+  });
   $("settings-open").addEventListener("click", () => {
     fillSettingsForm();
     $("settings-dialog").showModal();
@@ -492,15 +691,33 @@ function bindEvents() {
     const open = event.target.closest("[data-open]");
     const like = event.target.closest("[data-like]");
     const bookmark = event.target.closest("[data-bookmark]");
+    const collect = event.target.closest("[data-collect]");
     const copy = event.target.closest("[data-copy]");
     if (open) await openDetail(open.dataset.open);
     if (like) await toggleLike(like.dataset.like);
     if (bookmark) await toggleBookmark(bookmark.dataset.bookmark);
+    if (collect) await openCollectionPicker(collect.dataset.collect);
     if (copy) await copyAddress(copy.dataset.copy);
+  });
+  $("collections-list").addEventListener("click", async (event) => {
+    const open = event.target.closest("[data-collection-open]");
+    if (open) await openCollection(open.dataset.collectionOpen);
+  });
+  $("collection-media").addEventListener("click", async (event) => {
+    const open = event.target.closest("[data-open]");
+    if (open) await openDetail(open.dataset.open);
+  });
+  $("studio-list").addEventListener("click", async (event) => {
+    const open = event.target.closest("[data-open]");
+    const del = event.target.closest("[data-delete-media]");
+    if (open) await openDetail(open.dataset.open);
+    if (del) await deleteOwnMedia(del.dataset.deleteMedia);
   });
   $("detail-close").addEventListener("click", () => $("detail-dialog").close());
   $("detail-like").addEventListener("click", () => activeDetail && toggleLike(activeDetail.id));
   $("detail-bookmark").addEventListener("click", () => activeDetail && toggleBookmark(activeDetail.id));
+  $("detail-collect").addEventListener("click", () => activeDetail && openCollectionPicker(activeDetail.id));
+  $("detail-report").addEventListener("click", () => activeDetail && openReport(activeDetail.id));
   $("detail-copy").addEventListener("click", () => activeDetail && copyAddress(activeDetail.id));
   $("comment-form").addEventListener("submit", async (event) => {
     event.preventDefault();
