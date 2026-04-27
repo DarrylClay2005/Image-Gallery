@@ -8,6 +8,9 @@ FastAPI and MySQL gallery for wallpapers, profile pictures, memes, GIFs, and vid
 - Pick an existing category or create a new category while uploading.
 - Browse by media type, category, search text, newest, likes, or downloads.
 - Like posts, comment on posts, copy direct media addresses, and download files.
+- Private per-account settings for theme, accent color, grid density, default sort, preview behavior, reduced motion, and original-link behavior.
+- Public profile controls for circular avatar, display name, bio, website, location label, profile color, and profile visibility.
+- Save/bookmark media to a private account list.
 - Own MySQL schema and tables using the shared bot database login defaults.
 - Static GitHub Pages frontend that reads `live-config.json` to find the current public backend tunnel.
 

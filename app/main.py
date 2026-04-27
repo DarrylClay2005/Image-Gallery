@@ -53,6 +53,33 @@ class CommentRequest(BaseModel):
     body: str
 
 
+class ProfileUpdateRequest(BaseModel):
+    display_name: str
+    bio: str | None = None
+    website_url: str | None = None
+    location_label: str | None = None
+    profile_color: str = "#37c9a7"
+    public_profile: bool = True
+    show_liked_count: bool = True
+
+
+class SettingsUpdateRequest(BaseModel):
+    theme_mode: str | None = None
+    accent_color: str | None = None
+    grid_density: str | None = None
+    default_sort: str | None = None
+    items_per_page: int | None = None
+    autoplay_previews: bool | None = None
+    muted_previews: bool | None = None
+    reduce_motion: bool | None = None
+    open_original_in_new_tab: bool | None = None
+    blur_video_previews: bool | None = None
+
+
+class BookmarkRequest(BaseModel):
+    bookmarked: bool = True
+
+
 def _jsonable(value: Any) -> Any:
     if isinstance(value, list):
         return [_jsonable(item) for item in value]
@@ -88,6 +115,17 @@ def _with_urls(request: Request, item: dict[str, Any] | None) -> dict[str, Any] 
     clone = dict(item)
     clone["url"] = _public_url(request, clone["storage_path"])
     clone["download_url"] = str(request.url_for("download_media", media_id=clone["id"]))
+    if clone.get("user_avatar_path"):
+        clone["user_avatar_url"] = _public_url(request, clone["user_avatar_path"])
+    return _jsonable(clone)
+
+
+def _with_user_urls(request: Request, user: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not user:
+        return None
+    clone = dict(user)
+    if clone.get("avatar_path"):
+        clone["avatar_url"] = _public_url(request, clone["avatar_path"])
     return _jsonable(clone)
 
 
@@ -141,6 +179,12 @@ async def _save_upload(upload: UploadFile, media_kind: str, max_bytes: int) -> t
         abs_path.unlink(missing_ok=True)
         raise
     return rel_path.as_posix(), written
+
+
+async def _save_avatar(upload: UploadFile) -> tuple[str, int]:
+    if _detect_media_kind(upload) != "image":
+        raise HTTPException(status_code=400, detail="Profile pictures must be images.")
+    return await _save_upload(upload, "avatars", 5 * 1024 * 1024)
 
 
 @asynccontextmanager
@@ -212,7 +256,50 @@ async def me(request: Request) -> dict[str, Any]:
     user = await db.get_user(int(auth["id"]))
     if not user:
         raise HTTPException(status_code=401, detail="Account no longer exists.")
-    return {"user": _jsonable(user)}
+    return {"user": _with_user_urls(request, user)}
+
+
+@app.patch("/api/me/profile")
+async def update_profile(payload: ProfileUpdateRequest, request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    try:
+        user = await db.update_user_profile(int(auth["id"]), payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return {"user": _with_user_urls(request, user)}
+
+
+@app.patch("/api/me/settings")
+async def update_settings(payload: SettingsUpdateRequest, request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    try:
+        user = await db.update_user_settings(
+            int(auth["id"]),
+            {key: value for key, value in payload.model_dump().items() if value is not None},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return {"user": _with_user_urls(request, user)}
+
+
+@app.post("/api/me/avatar")
+async def update_avatar(request: Request, file: UploadFile = File(...)) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    storage_path, _file_size = await _save_avatar(file)
+    user = await db.update_user_avatar(
+        int(auth["id"]),
+        storage_path,
+        file.content_type or "application/octet-stream",
+        Path(file.filename or "avatar").name,
+    )
+    return {"user": _with_user_urls(request, user)}
+
+
+@app.get("/api/me/bookmarks")
+async def my_bookmarks(request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    items = await db.list_bookmarks(int(auth["id"]))
+    return {"media": [_with_urls(request, item) for item in items]}
 
 
 @app.get("/api/categories")
@@ -305,6 +392,15 @@ async def media_detail(media_id: int, request: Request) -> dict[str, Any]:
 async def like_media(media_id: int, payload: LikeRequest, request: Request) -> dict[str, Any]:
     auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
     item = await db.set_like(media_id, int(auth["id"]), payload.liked)
+    if not item:
+        raise HTTPException(status_code=404, detail="Media not found.")
+    return {"media": _with_urls(request, item)}
+
+
+@app.post("/api/media/{media_id}/bookmark")
+async def bookmark_media(media_id: int, payload: BookmarkRequest, request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    item = await db.set_bookmark(media_id, int(auth["id"]), payload.bookmarked)
     if not item:
         raise HTTPException(status_code=404, detail="Media not found.")
     return {"media": _with_urls(request, item)}
