@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#101318" />
+  <title>Image Gallery</title>
+  <link rel="stylesheet" href="./app/static/styles.css?v=1" />
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="Image Gallery home">
+      <span class="brand-mark">IG</span>
+      <span>Image Gallery</span>
+    </a>
+    <div class="topbar-actions">
+      <span id="connection-status" class="status-pill">Connecting</span>
+      <button id="upload-open" class="primary" type="button">Upload</button>
+      <button id="auth-open" type="button">Login</button>
+      <button id="logout" type="button" hidden>Logout</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-block">
+        <label class="field">
+          <span>Search</span>
+          <input id="search" type="search" placeholder="wallpaper, meme, vaporwave" />
+        </label>
+        <label class="field">
+          <span>Type</span>
+          <select id="kind-filter">
+            <option value="">All media</option>
+            <option value="image">Images and GIFs</option>
+            <option value="video">Videos</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Category</span>
+          <select id="category-filter">
+            <option value="">All categories</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Sort</span>
+          <select id="sort-filter">
+            <option value="new">Newest</option>
+            <option value="popular">Most liked</option>
+            <option value="downloads">Most downloaded</option>
+            <option value="old">Oldest</option>
+          </select>
+        </label>
+      </div>
+      <div class="stats-grid">
+        <div><strong id="stat-media">0</strong><span>Posts</span></div>
+        <div><strong id="stat-likes">0</strong><span>Likes</span></div>
+        <div><strong id="stat-users">0</strong><span>Users</span></div>
+        <div><strong id="stat-bytes">0 MB</strong><span>Stored</span></div>
+      </div>
+    </aside>
+
+    <section class="content">
+      <div class="content-head">
+        <div>
+          <h1>Fresh Drops</h1>
+          <p id="result-count" class="muted">Loading gallery</p>
+        </div>
+        <button id="refresh" type="button">Refresh</button>
+      </div>
+      <div id="gallery-grid" class="gallery-grid"></div>
+      <div id="empty-state" class="empty-state" hidden>
+        <h2>No posts yet</h2>
+        <p>Upload the first wallpaper, profile picture, meme, GIF, or video.</p>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="auth-dialog" class="modal">
+    <form method="dialog" class="modal-shell" id="auth-form">
+      <div class="modal-head">
+        <h2 id="auth-title">Login</h2>
+        <button class="icon-button" value="cancel" type="submit" aria-label="Close">X</button>
+      </div>
+      <div id="auth-error" class="notice error" hidden></div>
+      <label class="field">
+        <span>Username</span>
+        <input id="auth-username" autocomplete="username" required />
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <input id="auth-password" type="password" autocomplete="current-password" required />
+      </label>
+      <label id="display-name-wrap" class="field" hidden>
+        <span>Display name</span>
+        <input id="auth-display-name" autocomplete="nickname" />
+      </label>
+      <div class="modal-actions">
+        <button id="auth-submit" class="primary" type="submit">Login</button>
+        <button id="auth-toggle" type="button">Create Account</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="upload-dialog" class="modal">
+    <form method="dialog" class="modal-shell wide" id="upload-form">
+      <div class="modal-head">
+        <h2>Upload Media</h2>
+        <button class="icon-button" value="cancel" type="submit" aria-label="Close">X</button>
+      </div>
+      <div id="upload-error" class="notice error" hidden></div>
+      <label class="drop-zone" for="upload-file">
+        <input id="upload-file" name="file" type="file" accept="image/*,video/*" required />
+        <span id="file-label">Choose image, GIF, or video under 250MB</span>
+      </label>
+      <div class="form-grid">
+        <label class="field">
+          <span>Title</span>
+          <input id="upload-title" name="title" maxlength="160" required />
+        </label>
+        <label class="field">
+          <span>Category</span>
+          <select id="upload-category" name="category_id"></select>
+        </label>
+        <label id="new-category-wrap" class="field" hidden>
+          <span>New category</span>
+          <input id="new-category-name" name="category_name" maxlength="80" />
+        </label>
+        <label id="new-category-kind-wrap" class="field" hidden>
+          <span>Category type</span>
+          <select id="new-category-kind" name="category_kind">
+            <option value="mixed">Mixed</option>
+            <option value="image">Image</option>
+            <option value="video">Video</option>
+          </select>
+        </label>
+      </div>
+      <label class="field">
+        <span>Description</span>
+        <textarea id="upload-description" name="description" rows="3" maxlength="2000"></textarea>
+      </label>
+      <label class="field">
+        <span>Tags</span>
+        <input id="upload-tags" name="tags" placeholder="neon, funny, anime, desktop" />
+      </label>
+      <div class="modal-actions">
+        <button class="primary" type="submit">Post</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="detail-dialog" class="modal detail-modal">
+    <div class="modal-shell detail-shell">
+      <div class="modal-head">
+        <h2 id="detail-title">Media</h2>
+        <button id="detail-close" class="icon-button" type="button" aria-label="Close">X</button>
+      </div>
+      <div class="detail-grid">
+        <div id="detail-media" class="detail-media"></div>
+        <aside class="detail-side">
+          <p id="detail-meta" class="muted"></p>
+          <p id="detail-description"></p>
+          <div id="detail-tags" class="tag-row"></div>
+          <div class="action-row">
+            <button id="detail-like" type="button">Like</button>
+            <button id="detail-copy" type="button">Copy Address</button>
+            <a id="detail-download" class="button-link" href="#">Download</a>
+          </div>
+          <div class="comments">
+            <h3>Comments</h3>
+            <form id="comment-form" class="comment-form">
+              <input id="comment-body" maxlength="500" placeholder="Add a comment" />
+              <button type="submit">Send</button>
+            </form>
+            <div id="comments-list"></div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="./app/static/final_app.js?v=1"></script>
+</body>
+</html>
