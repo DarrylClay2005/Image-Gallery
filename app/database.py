@@ -1,5 +1,6 @@
 import json
 import re
+import hashlib
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -12,6 +13,7 @@ from .config import Settings
 
 SLUG_RE = re.compile(r"[^a-z0-9]+")
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,40}$")
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 MEDIA_KINDS = {"image", "video", "mixed"}
 DEFAULT_USER_SETTINGS = {
     "theme_mode": "system",
@@ -26,6 +28,10 @@ DEFAULT_USER_SETTINGS = {
     "blur_video_previews": False,
 }
 USER_COLUMNS = (
+    ("email", "VARCHAR(255) NULL"),
+    ("email_verified_at", "TIMESTAMP NULL DEFAULT NULL"),
+    ("email_verification_token_hash", "CHAR(64) NULL"),
+    ("email_verification_sent_at", "TIMESTAMP NULL DEFAULT NULL"),
     ("bio", "VARCHAR(500) NULL"),
     ("website_url", "VARCHAR(300) NULL"),
     ("location_label", "VARCHAR(80) NULL"),
@@ -62,6 +68,19 @@ def normalize_username(username: str) -> str:
     if not USERNAME_RE.fullmatch(username):
         raise ValueError("Username must be 3-40 characters using letters, numbers, dots, dashes, or underscores.")
     return username
+
+
+def normalize_email(email: str | None) -> str | None:
+    value = str(email or "").strip().lower()
+    if not value:
+        return None
+    if len(value) > 255 or not EMAIL_RE.fullmatch(value):
+        raise ValueError("Enter a valid email address.")
+    return value
+
+
+def verification_token_hash(token: str) -> str:
+    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
 
 
 class GalleryDatabase:
@@ -262,6 +281,10 @@ class GalleryDatabase:
                     if name not in existing:
                         await cur.execute(f"ALTER TABLE users ADD COLUMN {name} {definition}")
                 await cur.execute("UPDATE users SET user_settings=%s WHERE user_settings IS NULL", (json.dumps(DEFAULT_USER_SETTINGS),))
+                try:
+                    await cur.execute("CREATE UNIQUE INDEX uniq_users_email ON users (email)")
+                except Exception:
+                    pass
 
     async def ensure_media_columns(self) -> None:
         async with self.pool.acquire() as conn:
@@ -294,18 +317,48 @@ class GalleryDatabase:
         for name, kind in defaults:
             await self.create_category(name, kind, None)
 
-    async def register_user(self, username: str, password: str, display_name: str | None = None) -> dict[str, Any]:
+    async def register_user(
+        self,
+        username: str,
+        password: str,
+        display_name: str | None = None,
+        email: str | None = None,
+        email_verification_token: str | None = None,
+    ) -> dict[str, Any]:
         username = normalize_username(username)
+        email = normalize_email(email)
         if len(password or "") < 8:
             raise ValueError("Password must be at least 8 characters.")
         display_name = (display_name or username).strip()[:80] or username
+        token_hash = verification_token_hash(email_verification_token) if email and email_verification_token else None
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
-                    "INSERT INTO users (username, display_name, password_hash) VALUES (%s, %s, %s)",
-                    (username, display_name, hash_password(password)),
+                    """
+                    INSERT INTO users (username, display_name, password_hash, email, email_verification_token_hash, email_verification_sent_at)
+                    VALUES (%s, %s, %s, %s, %s, CASE WHEN %s IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END)
+                    """,
+                    (username, display_name, hash_password(password), email, token_hash, token_hash),
                 )
                 return await self.get_user(cur.lastrowid)
+
+    async def verify_email_by_token(self, token: str) -> dict[str, Any] | None:
+        token_hash = verification_token_hash(token)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT id FROM users WHERE email_verification_token_hash=%s LIMIT 1", (token_hash,))
+                row = await cur.fetchone()
+                if not row:
+                    return None
+                await cur.execute(
+                    """
+                    UPDATE users
+                    SET email_verified_at=CURRENT_TIMESTAMP, email_verification_token_hash=NULL
+                    WHERE id=%s
+                    """,
+                    (row["id"],),
+                )
+                return await self.get_user(row["id"])
 
     async def authenticate_user(self, username: str, password: str) -> dict[str, Any] | None:
         username = normalize_username(username)
@@ -324,7 +377,7 @@ class GalleryDatabase:
                 await cur.execute(
                     """
                     SELECT id, username, display_name, bio, website_url, location_label, profile_color,
-                           avatar_path, avatar_mime_type, avatar_original_filename, public_profile,
+                           email, email_verified_at, avatar_path, avatar_mime_type, avatar_original_filename, public_profile,
                            show_liked_count, birthdate, age_verified_at, adult_content_consent,
                            user_settings, created_at, updated_at
                     FROM users WHERE id=%s
@@ -932,6 +985,7 @@ class GalleryDatabase:
         user["show_liked_count"] = bool(user.get("show_liked_count"))
         user["adult_content_consent"] = bool(user.get("adult_content_consent"))
         user["age_verified"] = bool(user.get("age_verified_at"))
+        user["email_verified"] = bool(user.get("email_verified_at"))
         return user
 
     def _decode_collection(self, row: dict[str, Any]) -> dict[str, Any]:

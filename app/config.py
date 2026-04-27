@@ -41,6 +41,12 @@ class Settings:
     pages_public_url: str
     uploads_dir: Path
     max_upload_bytes: int
+    smtp_host: str
+    smtp_port: int
+    smtp_username: str
+    smtp_password: str
+    smtp_from_email: str
+    smtp_use_tls: bool
 
 
 def load_settings() -> Settings:
@@ -57,4 +63,10 @@ def load_settings() -> Settings:
         pages_public_url=pages_url,
         uploads_dir=Path(_env("GALLERY_UPLOADS_DIR", str(ROOT_DIR / "uploads"))),
         max_upload_bytes=int(_env("GALLERY_MAX_UPLOAD_BYTES", str(250 * 1024 * 1024))),
+        smtp_host=_env("GALLERY_SMTP_HOST") or _env("SMTP_HOST"),
+        smtp_port=int(_env("GALLERY_SMTP_PORT") or _env("SMTP_PORT") or "587"),
+        smtp_username=_env("GALLERY_SMTP_USERNAME") or _env("SMTP_USERNAME"),
+        smtp_password=_env("GALLERY_SMTP_PASSWORD") or _env("SMTP_PASSWORD"),
+        smtp_from_email=_env("GALLERY_SMTP_FROM_EMAIL") or _env("SMTP_FROM_EMAIL") or _env("GALLERY_SMTP_USERNAME") or _env("SMTP_USERNAME"),
+        smtp_use_tls=(_env("GALLERY_SMTP_USE_TLS") or _env("SMTP_USE_TLS") or "true").lower() not in {"0", "false", "no", "off"},
     )

@@ -1,6 +1,7 @@
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import uuid
 from contextlib import asynccontextmanager
@@ -18,6 +19,7 @@ from pydantic import BaseModel
 from .auth import extract_bearer_token, issue_token, require_auth, verify_token
 from .config import ROOT_DIR, load_settings
 from .database import GalleryDatabase
+from .emailer import send_verification_email
 
 
 settings = load_settings()
@@ -38,6 +40,7 @@ ADULT_KEYWORDS = {
 class RegisterRequest(BaseModel):
     username: str
     password: str
+    email: str | None = None
     display_name: str | None = None
 
 
@@ -153,6 +156,10 @@ def _age_from_birthdate(birthdate: date) -> int:
 
 def _public_url(request: Request, storage_path: str) -> str:
     return str(request.url_for("uploads", path=storage_path))
+
+
+def _verification_url(request: Request, token: str) -> str:
+    return str(request.url_for("verify_email")).replace("http://", "https://") + f"?token={token}"
 
 
 def _with_urls(request: Request, item: dict[str, Any] | None, adult_allowed: bool = False) -> dict[str, Any] | None:
@@ -326,16 +333,28 @@ async def health() -> dict[str, Any]:
 
 
 @app.post("/api/auth/register")
-async def register(payload: RegisterRequest) -> dict[str, Any]:
+async def register(payload: RegisterRequest, request: Request) -> dict[str, Any]:
+    email_token = secrets.token_urlsafe(32) if payload.email else None
     try:
-        user = await db.register_user(payload.username, payload.password, payload.display_name)
+        user = await db.register_user(payload.username, payload.password, payload.display_name, payload.email, email_token)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     except Exception as exc:
         if "Duplicate" in str(exc):
-            raise HTTPException(status_code=409, detail="That username is already taken.") from None
+            raise HTTPException(status_code=409, detail="That username or email is already taken.") from None
         raise
+    verification_sent = False
+    if user.get("email") and email_token:
+        verification_sent = send_verification_email(settings, user["email"], _verification_url(request, email_token))
     return {"user": _jsonable(user), "token": issue_token(settings.session_secret, user)}
+
+
+@app.get("/api/auth/verify-email", name="verify_email")
+async def verify_email(token: str) -> dict[str, Any]:
+    user = await db.verify_email_by_token(token)
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid or expired verification link.")
+    return {"ok": True, "user": _jsonable(user)}
 
 
 @app.post("/api/auth/login")

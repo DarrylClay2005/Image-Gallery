@@ -14,7 +14,7 @@
       <span>Image Gallery</span>
     </a>
     <div class="topbar-actions">
-      <span id="connection-status" class="status-pill">Connecting</span>
+      <span id="connection-status" class="status-pill" hidden>Connecting</span>
       <button id="surprise-open" type="button">Surprise</button>
       <button id="collections-open" type="button">Collections</button>
       <button id="studio-open" type="button" hidden>Studio</button>
@@ -112,6 +112,10 @@
       <label id="display-name-wrap" class="field" hidden>
         <span>Display name</span>
         <input id="auth-display-name" autocomplete="nickname" />
+      </label>
+      <label id="email-wrap" class="field" hidden>
+        <span>Email</span>
+        <input id="auth-email" type="email" autocomplete="email" />
       </label>
       <div class="modal-actions">
         <button id="auth-submit" class="primary" type="submit">Login</button>

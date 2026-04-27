@@ -98,6 +98,21 @@ function renderAuth() {
     renderAvatar("account-avatar", currentUser);
   }
   applyAccountSettings();
+  applyDesmondVisibility();
+}
+
+function isDesmondUser() {
+  const username = String(currentUser?.username || "").trim().toLowerCase();
+  const displayName = String(currentUser?.display_name || "").trim().toLowerCase();
+  return username === "desmond" || displayName === "desmond";
+}
+
+function applyDesmondVisibility() {
+  const canSeePrivateData = isDesmondUser();
+  const status = $("connection-status");
+  const stats = document.querySelector(".stats-grid");
+  if (status) status.hidden = !canSeePrivateData;
+  if (stats) stats.hidden = !canSeePrivateData;
 }
 
 function openAgeDialog(message = "") {
@@ -170,6 +185,7 @@ async function initApiOrigin() {
   if (!REMOTE_MODE) {
     apiOrigin = "";
     $("connection-status").textContent = "Local";
+    applyDesmondVisibility();
     return;
   }
   try {
@@ -180,18 +196,20 @@ async function initApiOrigin() {
   } catch (_err) {
     $("connection-status").textContent = "No backend";
   }
+  applyDesmondVisibility();
 }
 
 async function refreshAll() {
-  await Promise.all([loadCategories(), loadStats(), loadTags()]);
+  await Promise.all([loadCategories(), isDesmondUser() ? loadStats() : Promise.resolve(), loadTags()]);
   await loadMedia();
 }
 
 async function loadTags() {
   const data = await apiFetch("/api/tags");
   const tags = data.tags || [];
+  const showCounts = isDesmondUser();
   $("tag-cloud").innerHTML = tags.length ? tags.map((item) => (
-    `<button type="button" data-tag="${escapeHtml(item.tag)}">${escapeHtml(item.tag)} <span>${item.count}</span></button>`
+    `<button type="button" data-tag="${escapeHtml(item.tag)}">${escapeHtml(item.tag)}${showCounts ? ` <span>${item.count}</span>` : ""}</button>`
   )).join("") : `<span class="muted">No tags yet</span>`;
 }
 
@@ -205,7 +223,8 @@ async function loadCategories() {
   filter.innerHTML = `<option value="">All categories</option>`;
   upload.innerHTML = `<option value="">Create new category</option>`;
   for (const category of categories) {
-    filter.insertAdjacentHTML("beforeend", `<option value="${category.id}">${escapeHtml(category.name)} (${category.media_count || 0})</option>`);
+    const count = isDesmondUser() ? ` (${category.media_count || 0})` : "";
+    filter.insertAdjacentHTML("beforeend", `<option value="${category.id}">${escapeHtml(category.name)}${count}</option>`);
     upload.insertAdjacentHTML("beforeend", `<option value="${category.id}">${escapeHtml(category.name)}</option>`);
   }
   filter.value = selectedFilter;
@@ -555,6 +574,7 @@ function setRegisterMode(next) {
   $("auth-submit").textContent = next ? "Create Account" : "Login";
   $("auth-toggle").textContent = next ? "Use Login" : "Create Account";
   $("display-name-wrap").hidden = !next;
+  $("email-wrap").hidden = !next;
 }
 
 async function submitAuth(event) {
@@ -565,7 +585,10 @@ async function submitAuth(event) {
       username: $("auth-username").value.trim(),
       password: $("auth-password").value,
     };
-    if (registerMode) payload.display_name = $("auth-display-name").value.trim();
+    if (registerMode) {
+      payload.display_name = $("auth-display-name").value.trim();
+      payload.email = $("auth-email").value.trim();
+    }
     const data = await apiFetch(registerMode ? "/api/auth/register" : "/api/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
