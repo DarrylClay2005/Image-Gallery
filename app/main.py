@@ -91,6 +91,17 @@ class MediaUpdateRequest(BaseModel):
     category_id: int
     tags: list[str] = []
     is_adult: bool = False
+    visibility: str = "public"
+    comments_enabled: bool = True
+    downloads_enabled: bool = True
+    pinned: bool = False
+
+
+class MediaControlRequest(BaseModel):
+    visibility: str | None = None
+    comments_enabled: bool | None = None
+    downloads_enabled: bool | None = None
+    pinned: bool | None = None
 
 
 
@@ -630,9 +641,9 @@ async def my_bookmarks(request: Request) -> dict[str, Any]:
 
 
 @app.get("/api/me/media")
-async def my_media(request: Request) -> dict[str, Any]:
+async def my_media(request: Request, include_deleted: bool = True) -> dict[str, Any]:
     auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
-    items = await db.list_user_media(int(auth["id"]))
+    items = await db.list_user_media(int(auth["id"]), include_deleted=include_deleted)
     adult_allowed = await _viewer_can_open_adult(request)
     return {"media": [_with_urls(request, item, adult_allowed) for item in items]}
 
@@ -787,9 +798,16 @@ async def upload_media(
     category_kind: str = Form("mixed"),
     tags: str = Form(""),
     is_adult: bool = Form(False),
+    visibility: str = Form("public"),
+    comments_enabled: bool = Form(True),
+    downloads_enabled: bool = Form(True),
+    pinned: bool = Form(False),
 ) -> dict[str, Any]:
     auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
     media_kind = _detect_media_kind(file)
+    visibility = str(visibility or "public").lower()
+    if visibility not in {"public", "unlisted", "private"}:
+        raise HTTPException(status_code=400, detail="Visibility must be public, unlisted, or private.")
     title = " ".join(title.strip().split())[:160]
     if not title:
         raise HTTPException(status_code=400, detail="Title is required.")
@@ -828,6 +846,10 @@ async def upload_media(
             "media_file_id": int(media_file["id"]),
             "content_sha256": uploaded["sha256"],
             "file_size": uploaded["file_size"],
+            "visibility": visibility,
+            "comments_enabled": comments_enabled,
+            "downloads_enabled": downloads_enabled,
+            "pinned": pinned,
             **moderation,
         }
     )
@@ -840,8 +862,10 @@ async def media_detail(media_id: int, request: Request) -> dict[str, Any]:
     viewer_id = _user_id(_auth_optional(request))
     adult_allowed = await _viewer_can_open_adult(request)
     item = await db.get_media(media_id, viewer_id)
-    if not item:
+    if not item or item.get("deleted_at"):
         raise HTTPException(status_code=404, detail="Media not found.")
+    if item.get("visibility") == "private" and int(item.get("user_id")) != int(viewer_id or 0):
+        raise HTTPException(status_code=403, detail="This post is private.")
     if item.get("is_adult") and not adult_allowed:
         raise HTTPException(status_code=403, detail="Age verification required for this 18+ post.")
     await db.increment_counter(media_id, "views")
@@ -858,6 +882,34 @@ async def edit_media(media_id: int, payload: MediaUpdateRequest, request: Reques
         raise HTTPException(status_code=403, detail=str(exc)) from None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
+    if not item:
+        raise HTTPException(status_code=404, detail="Media not found.")
+    adult_allowed = await _viewer_can_open_adult(request)
+    return {"media": _with_urls(request, item, adult_allowed)}
+
+
+@app.patch("/api/media/{media_id}/controls")
+async def edit_media_controls(media_id: int, payload: MediaControlRequest, request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    try:
+        item = await db.set_media_controls(media_id, int(auth["id"]), payload.model_dump(exclude_none=True))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    if not item:
+        raise HTTPException(status_code=404, detail="Media not found.")
+    adult_allowed = await _viewer_can_open_adult(request)
+    return {"media": _with_urls(request, item, adult_allowed)}
+
+
+@app.post("/api/media/{media_id}/restore")
+async def restore_media(media_id: int, request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    try:
+        item = await db.restore_media(media_id, int(auth["id"]))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from None
     if not item:
         raise HTTPException(status_code=404, detail="Media not found.")
     adult_allowed = await _viewer_can_open_adult(request)
@@ -891,6 +943,8 @@ async def add_comment(media_id: int, payload: CommentRequest, request: Request) 
         raise HTTPException(status_code=404, detail="Media not found.")
     try:
         comment = await db.add_comment(media_id, int(auth["id"]), payload.body)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     return {"comment": _jsonable(comment)}
@@ -938,8 +992,13 @@ async def _adult_file_allowed(request: Request, media_id: int, access: str | Non
 async def _serve_media_content(media_id: int, request: Request, *, access: str | None, as_download: bool) -> Response:
     viewer_id = _user_id(_auth_optional(request))
     item = await db.get_media(media_id, viewer_id)
-    if not item:
+    if not item or item.get("deleted_at"):
         raise HTTPException(status_code=404, detail="Media not found.")
+    owner = int(item.get("user_id")) == int(viewer_id or 0)
+    if item.get("visibility") == "private" and not owner:
+        raise HTTPException(status_code=403, detail="This post is private.")
+    if as_download and not item.get("downloads_enabled", True) and not owner:
+        raise HTTPException(status_code=403, detail="Downloads are disabled for this post.")
     if item.get("is_adult") and not await _adult_file_allowed(request, media_id, access):
         raise HTTPException(status_code=403, detail="Age verification required for this 18+ post.")
 

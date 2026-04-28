@@ -288,7 +288,7 @@ function renderMediaGrid() {
           <div class="avatar tiny" style="border-color:${escapeHtml(item.profile_color || "#37c9a7")}">${item.user_avatar_url ? `<img src="${item.user_avatar_url}" alt="">` : escapeHtml((item.display_name || item.username || "IG").slice(0, 2).toUpperCase())}</div>
           <div>
           <h2>${adultBadge(item)}${escapeHtml(item.title)}</h2>
-          <p class="muted">${escapeHtml(item.category_name)} by ${escapeHtml(item.display_name || item.username)}</p>
+          <p class="muted">${escapeHtml(item.category_name)} by ${escapeHtml(item.display_name || item.username)}${item.visibility && item.visibility !== "public" ? ` · ${escapeHtml(item.visibility)}` : ""}${item.pinned_at ? " · pinned" : ""}</p>
           </div>
         </div>
         <div class="metric-row">
@@ -301,7 +301,8 @@ function renderMediaGrid() {
           <button type="button" data-bookmark="${item.id}">${item.bookmarked_by_me ? "Saved" : "Save"}</button>
           <button type="button" data-collect="${item.id}">Collect</button>
           <button type="button" data-copy="${item.id}" ${item.url ? "" : "disabled"}>Copy Address</button>
-          ${item.download_url ? `<a href="${item.download_url}" ${prefs.open_original_in_new_tab ? 'target="_blank" rel="noopener"' : ""}>Download</a>` : `<button type="button" data-age-gate>Download</button>`}
+          ${currentUser && Number(item.user_id) === Number(currentUser.id) ? `<button type="button" data-edit-media="${item.id}">Manage</button>` : ""}
+          ${item.download_url && item.downloads_enabled !== false ? `<a href="${item.download_url}" ${prefs.open_original_in_new_tab ? 'target="_blank" rel="noopener"' : ""}>Download</a>` : `<button type="button" data-age-gate>${item.downloads_enabled === false ? "No downloads" : "Download"}</button>`}
         </div>
       </div>
     `;
@@ -337,6 +338,8 @@ async function openDetail(id) {
   $("detail-download").href = item.download_url || "#";
   $("detail-download").toggleAttribute("aria-disabled", !item.download_url);
   renderComments(data.comments || []);
+  const commentForm = $("comment-form");
+  if (commentForm) commentForm.hidden = item.comments_enabled === false && Number(item.user_id) !== Number(currentUser?.id);
   if (!$("detail-dialog").open) $("detail-dialog").showModal();
 }
 
@@ -544,7 +547,12 @@ async function editOwnMedia(id) {
   if (description === null) return;
   const tags = prompt("Edit tags, comma separated:", (item.tags || []).join(", "));
   if (tags === null) return;
-  const adult = confirm("Mark this post as 18+?");
+  const visibility = (prompt("Visibility: public, unlisted, or private", item.visibility || "public") || "public").toLowerCase();
+  if (!["public", "unlisted", "private"].includes(visibility)) return alert("Visibility must be public, unlisted, or private.");
+  const commentsEnabled = confirm("Allow comments on this post? OK = yes, Cancel = no");
+  const downloadsEnabled = confirm("Allow downloads on this post? OK = yes, Cancel = no");
+  const pinned = confirm("Pin this post to the top of your results? OK = yes, Cancel = no");
+  const adult = confirm("Mark this post as 18+? OK = yes, Cancel = no");
   const categoryId = Number(item.category_id || categories[0]?.id || 0);
   const data = await apiFetch(`/api/media/${id}`, {
     method: "PATCH",
@@ -555,9 +563,19 @@ async function editOwnMedia(id) {
       category_id: categoryId,
       tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean),
       is_adult: adult,
+      visibility,
+      comments_enabled: commentsEnabled,
+      downloads_enabled: downloadsEnabled,
+      pinned,
     }),
   });
   mediaItems = mediaItems.map((entry) => Number(entry.id) === Number(id) ? data.media : entry);
+  await openStudio();
+  await refreshAll();
+}
+
+async function restoreOwnMedia(id) {
+  await apiFetch(`/api/media/${id}/restore`, { method: "POST" });
   await openStudio();
   await refreshAll();
 }
@@ -577,7 +595,7 @@ async function loadLikedFeed() {
 }
 
 async function deleteOwnMedia(id) {
-  if (!confirm("Delete this post permanently?")) return;
+  if (!confirm("Archive this post? It will disappear from the gallery but can be restored from Studio.")) return;
   await apiFetch(`/api/media/${id}`, { method: "DELETE" });
   await openStudio();
   await refreshAll();
@@ -846,6 +864,28 @@ async function saveAvatar() {
   }
 }
 
+function ensureUploadControlFields() {
+  const form = $("upload-form");
+  if (!form || $("upload-visibility")) return;
+  const submit = form.querySelector('button[type="submit"], .primary');
+  const wrapper = document.createElement("div");
+  wrapper.className = "upload-controls-grid";
+  wrapper.innerHTML = `
+    <label class="field">Visibility
+      <select id="upload-visibility">
+        <option value="public">Public - appears in the gallery</option>
+        <option value="unlisted">Unlisted - link/profile only</option>
+        <option value="private">Private - only me</option>
+      </select>
+    </label>
+    <label class="check-row"><input id="upload-comments-enabled" type="checkbox" checked> Allow comments</label>
+    <label class="check-row"><input id="upload-downloads-enabled" type="checkbox" checked> Allow downloads</label>
+    <label class="check-row"><input id="upload-pinned" type="checkbox"> Pin in my studio/feed</label>
+  `;
+  if (submit) form.insertBefore(wrapper, submit);
+  else form.appendChild(wrapper);
+}
+
 async function submitUpload(event) {
   event.preventDefault();
   if (!currentUser) {
@@ -863,6 +903,10 @@ async function submitUpload(event) {
   body.set("description", $("upload-description").value);
   body.set("tags", $("upload-tags").value);
   body.set("is_adult", $("upload-adult").checked ? "true" : "false");
+  if ($("upload-visibility")) body.set("visibility", $("upload-visibility").value || "public");
+  if ($("upload-comments-enabled")) body.set("comments_enabled", $("upload-comments-enabled").checked ? "true" : "false");
+  if ($("upload-downloads-enabled")) body.set("downloads_enabled", $("upload-downloads-enabled").checked ? "true" : "false");
+  if ($("upload-pinned")) body.set("pinned", $("upload-pinned").checked ? "true" : "false");
   if ($("upload-category").value) {
     body.set("category_id", $("upload-category").value);
   } else {
@@ -901,6 +945,7 @@ async function resendEmailVerification() {
 }
 
 function bindEvents() {
+  ensureUploadControlFields();
   $("auth-open").addEventListener("click", () => $("auth-dialog").showModal());
   $("logout").addEventListener("click", async () => {
     token = "";
@@ -957,8 +1002,10 @@ function bindEvents() {
     const bookmark = event.target.closest("[data-bookmark]");
     const collect = event.target.closest("[data-collect]");
     const copy = event.target.closest("[data-copy]");
+    const manage = event.target.closest("[data-edit-media]");
     const ageGate = event.target.closest("[data-age-gate]");
     if (open && !handleAdultOpen(open.dataset.open)) await openDetail(open.dataset.open);
+    if (manage) await editOwnMedia(manage.dataset.editMedia);
     if (like) await toggleLike(like.dataset.like);
     if (bookmark) await toggleBookmark(bookmark.dataset.bookmark);
     if (collect) await openCollectionPicker(collect.dataset.collect);
@@ -977,9 +1024,11 @@ function bindEvents() {
     const open = event.target.closest("[data-open]");
     const edit = event.target.closest("[data-edit-media]");
     const del = event.target.closest("[data-delete-media]");
+    const restore = event.target.closest("[data-restore-media]");
     if (open && !handleAdultOpen(open.dataset.open)) await openDetail(open.dataset.open);
     if (edit) await editOwnMedia(edit.dataset.editMedia);
     if (del) await deleteOwnMedia(del.dataset.deleteMedia);
+    if (restore) await restoreOwnMedia(restore.dataset.restoreMedia);
   });
   $("comments-list").addEventListener("click", async (event) => {
     const del = event.target.closest("[data-delete-comment]");

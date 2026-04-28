@@ -564,3 +564,14 @@ button:hover, .button-link:hover { border-color: var(--accent); }
   .detail-side { order: 2; }
   .profile-row { align-items: stretch; flex-direction: column; }
 }
+
+
+/* User post controls */
+.studio-item .muted + .muted { margin-top: 3px; font-size: 0.82rem; }
+button[data-delete-media] { border-color: rgba(255, 107, 107, 0.45); }
+button[data-restore-media] { border-color: rgba(55, 201, 167, 0.55); }
+button[data-edit-media] { border-color: rgba(224, 179, 75, 0.45); }
+
+.upload-controls-grid { display: grid; gap: 10px; grid-template-columns: 1fr; padding: 8px 0; }
+.check-row { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 0.9rem; }
+.check-row input { width: auto; min-height: auto; }
