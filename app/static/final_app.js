@@ -4,12 +4,14 @@ const CONFIG_FILE = "live-config.json";
 const TOKEN_KEY = "image_gallery_token";
 const USER_KEY = "image_gallery_user";
 const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
+const GALLERY_PAGE_SIZE = 15;
+const LIVE_CHECK_INTERVAL_MS = 15000;
 const DEFAULT_USER_SETTINGS = {
   theme_mode: "system",
   accent_color: "#37c9a7",
   grid_density: "comfortable",
   default_sort: "new",
-  items_per_page: 60,
+  items_per_page: GALLERY_PAGE_SIZE,
   autoplay_previews: false,
   muted_previews: true,
   reduce_motion: false,
@@ -33,6 +35,11 @@ let currentUser = readJsonStore(USER_KEY);
 let categories = [];
 let mediaItems = [];
 let collectionsState = [];
+let galleryMode = "main";
+let galleryPage = 1;
+let galleryHasNext = false;
+let galleryLoading = false;
+let latestLiveSnapshot = null;
 let activeDetail = null;
 let selectedCollectionMediaId = null;
 let selectedReportMediaId = null;
@@ -374,7 +381,7 @@ function fillSettingsForm() {
   setValue("pref-accent-color", prefs.accent_color || "#37c9a7");
   setValue("pref-grid-density", prefs.grid_density || "comfortable");
   setValue("pref-default-sort", prefs.default_sort || "new");
-  setValue("pref-items-per-page", prefs.items_per_page || 60);
+  setValue("pref-items-per-page", GALLERY_PAGE_SIZE);
   setChecked("pref-autoplay-previews", prefs.autoplay_previews);
   setChecked("pref-muted-previews", prefs.muted_previews !== false);
   setChecked("pref-reduce-motion", prefs.reduce_motion);
@@ -415,7 +422,7 @@ async function submitSettings(event) {
       accent_color: $("pref-accent-color").value,
       grid_density: $("pref-grid-density").value,
       default_sort: $("pref-default-sort").value,
-      items_per_page: Number($("pref-items-per-page").value || 60),
+      items_per_page: GALLERY_PAGE_SIZE,
       autoplay_previews: $("pref-autoplay-previews").checked,
       muted_previews: $("pref-muted-previews").checked,
       reduce_motion: $("pref-reduce-motion").checked,
@@ -650,8 +657,9 @@ async function initApiOrigin() {
 }
 
 async function refreshAll() {
+  await runLiveChecks({ silent: true }).catch(() => {});
   await Promise.all([loadCategories(), isDesmondUser() ? loadStats() : Promise.resolve(), loadTags()]);
-  await loadMedia();
+  await loadMedia(galleryMode === "main" ? galleryPage : 1);
 }
 
 async function loadTags() {
@@ -660,7 +668,7 @@ async function loadTags() {
   const showCounts = isDesmondUser();
   $("tag-cloud").innerHTML = tags.length ? tags.map((item) => (
     `<button type="button" data-tag="${escapeHtml(item.tag)}">${escapeHtml(item.tag)}${showCounts ? ` <span>${item.count}</span>` : ""}</button>`
-  )).join("") : `<span class="muted">No tags yet</span>`;
+  )).join("") : `<span class="muted">${latestLiveSnapshot?.media_active ? "No public tags on loaded posts" : "Checking tags"}</span>`;
 }
 
 async function loadCategories() {
@@ -696,23 +704,103 @@ async function loadStats() {
   $("stat-bytes").textContent = formatBytes(stats.bytes || 0);
 }
 
-async function loadMedia() {
+function galleryFiltersActive() {
+  return Boolean(
+    safeEl("search")?.value?.trim()
+    || safeEl("kind-filter")?.value
+    || safeEl("category-filter")?.value
+  );
+}
+
+function setEmptyState(title, message, visible = true) {
+  setTextIfPresent("empty-title", title);
+  setTextIfPresent("empty-message", message);
+  showIfPresent("empty-state", visible);
+}
+
+function updateGalleryPagination() {
+  const pagination = safeEl("gallery-pagination");
+  if (!pagination) return;
+  const hasAnyPaging = galleryPage > 1 || galleryHasNext;
+  pagination.hidden = galleryLoading || !hasAnyPaging;
+  setTextIfPresent("gallery-page-status", `Page ${galleryPage}`);
+  setDisabledIfPresent("gallery-prev", galleryPage <= 1);
+  setDisabledIfPresent("gallery-next", !galleryHasNext);
+}
+
+async function loadMedia(page = galleryPage, { scrollToTop = false } = {}) {
+  galleryMode = "main";
+  galleryPage = Math.max(1, Number(page) || 1);
+  galleryLoading = true;
+  setTextIfPresent("result-count", `Loading page ${galleryPage}`);
+  showIfPresent("empty-state", false);
+  updateGalleryPagination();
   const params = new URLSearchParams();
   if ($("kind-filter").value) params.set("media_kind", $("kind-filter").value);
   if ($("category-filter").value) params.set("category_id", $("category-filter").value);
   if ($("search").value.trim()) params.set("q", $("search").value.trim());
   params.set("sort", $("sort-filter").value);
-  params.set("limit", userSettings().items_per_page || 60);
-  const data = await apiFetch(`/api/media?${params}`);
-  mediaItems = data.media || [];
-  renderMediaGrid();
+  params.set("limit", GALLERY_PAGE_SIZE + 1);
+  params.set("offset", (galleryPage - 1) * GALLERY_PAGE_SIZE);
+  try {
+    const data = await apiFetch(`/api/media?${params}`);
+    const rows = data.media || [];
+    galleryHasNext = rows.length > GALLERY_PAGE_SIZE;
+    mediaItems = rows.slice(0, GALLERY_PAGE_SIZE);
+    renderMediaGrid();
+    if (scrollToTop) safeEl("gallery-grid")?.scrollIntoView({ behavior: userSettings().reduce_motion ? "auto" : "smooth", block: "start" });
+  } catch (err) {
+    mediaItems = [];
+    galleryHasNext = false;
+    $("gallery-grid").innerHTML = "";
+    setTextIfPresent("result-count", err.message || "Gallery failed to load");
+    setEmptyState("Gallery check needed", "The gallery could not load posts. Use Checks or Refresh to test the live backend.");
+  } finally {
+    galleryLoading = false;
+    updateGalleryPagination();
+  }
+}
+
+function focusGalleryOnNewestUploads() {
+  const search = safeEl("search");
+  const kind = safeEl("kind-filter");
+  const category = safeEl("category-filter");
+  const sort = safeEl("sort-filter");
+  if (search) search.value = "";
+  if (kind) kind.value = "";
+  if (category) category.value = "";
+  if (sort) sort.value = "new";
+  galleryPage = 1;
 }
 
 function renderMediaGrid() {
   const grid = $("gallery-grid");
   grid.innerHTML = "";
-  $("result-count").textContent = `${mediaItems.length} ${mediaItems.length === 1 ? "post" : "posts"}`;
-  $("empty-state").hidden = mediaItems.length > 0;
+  const start = mediaItems.length ? ((galleryPage - 1) * GALLERY_PAGE_SIZE) + 1 : 0;
+  const end = start + mediaItems.length - 1;
+  $("result-count").textContent = mediaItems.length
+    ? `Page ${galleryPage} · showing ${start}-${end}${galleryHasNext ? "+" : ""}`
+    : galleryFiltersActive()
+      ? `${galleryMode === "liked" ? "No saved likes" : galleryMode === "following" ? "No following posts" : "No posts match this view"}`
+      : latestLiveSnapshot?.media_active
+        ? `${Number(latestLiveSnapshot.media_active)} posts live · refresh if they do not appear`
+        : "Checking for posts";
+  if (!mediaItems.length) {
+    if (galleryMode === "following") {
+      setEmptyState("Nothing from follows yet", "Follow uploaders to build a paged feed here.");
+    } else if (galleryMode === "liked") {
+      setEmptyState("No liked posts yet", "Like posts to keep them in this paged view.");
+    } else if (galleryFiltersActive()) {
+      setEmptyState("No matches", "Try clearing search, category, or media-type filters.");
+    } else if (latestLiveSnapshot?.media_active) {
+      setEmptyState("Posts are live", "The backend reports posts are available. Refresh or run Checks if this page stays empty.", false);
+    } else {
+      setEmptyState("Gallery loading", "Checking the live backend before showing an empty gallery.", false);
+    }
+  } else {
+    showIfPresent("empty-state", false);
+  }
+  updateGalleryPagination();
   for (const item of mediaItems) {
     const card = document.createElement("article");
     card.className = `media-card${item.is_adult ? " adult-card" : ""}`;
@@ -744,6 +832,12 @@ function renderMediaGrid() {
     `;
     grid.appendChild(card);
   }
+}
+
+async function loadCurrentGalleryPage(page = galleryPage, options = {}) {
+  if (galleryMode === "following") return loadFollowingFeed(page, options);
+  if (galleryMode === "liked") return loadLikedFeed(page, options);
+  return loadMedia(page, options);
 }
 
 async function openDetail(id) {
@@ -1032,18 +1126,44 @@ async function restoreOwnMedia(id) {
   await refreshAll();
 }
 
-async function loadFollowingFeed() {
-  if (!currentUser) return $("auth-dialog").showModal();
-  const data = await apiFetch("/api/feed/following");
-  mediaItems = data.media || [];
-  renderMediaGrid();
+async function loadPagedFeed(path, mode, page = 1, { scrollToTop = false } = {}) {
+  galleryMode = mode;
+  galleryPage = Math.max(1, Number(page) || 1);
+  galleryLoading = true;
+  setTextIfPresent("result-count", `Loading page ${galleryPage}`);
+  showIfPresent("empty-state", false);
+  updateGalleryPagination();
+  const params = new URLSearchParams({
+    limit: String(GALLERY_PAGE_SIZE + 1),
+    offset: String((galleryPage - 1) * GALLERY_PAGE_SIZE),
+  });
+  try {
+    const data = await apiFetch(`${path}?${params}`);
+    const rows = data.media || [];
+    galleryHasNext = rows.length > GALLERY_PAGE_SIZE;
+    mediaItems = rows.slice(0, GALLERY_PAGE_SIZE);
+    renderMediaGrid();
+    if (scrollToTop) safeEl("gallery-grid")?.scrollIntoView({ behavior: userSettings().reduce_motion ? "auto" : "smooth", block: "start" });
+  } catch (err) {
+    mediaItems = [];
+    galleryHasNext = false;
+    $("gallery-grid").innerHTML = "";
+    setTextIfPresent("result-count", err.message || "Feed failed to load");
+    setEmptyState("Feed check needed", "This feed could not load. Use Checks or Refresh to test the live backend.");
+  } finally {
+    galleryLoading = false;
+    updateGalleryPagination();
+  }
 }
 
-async function loadLikedFeed() {
+async function loadFollowingFeed(page = 1, options = {}) {
   if (!currentUser) return $("auth-dialog").showModal();
-  const data = await apiFetch("/api/me/likes");
-  mediaItems = data.media || [];
-  renderMediaGrid();
+  return loadPagedFeed("/api/feed/following", "following", page, options);
+}
+
+async function loadLikedFeed(page = 1, options = {}) {
+  if (!currentUser) return $("auth-dialog").showModal();
+  return loadPagedFeed("/api/me/likes", "liked", page, options);
 }
 
 function friendButtonLabel(status) {
@@ -1411,9 +1531,10 @@ async function submitUpload(event) {
       const seconds = Math.max(1, Math.round((Date.now() - uploadStartedAt) / 1000));
       setUploadProgress(percent, `${formatBytes(loaded)} of ${formatBytes(total)} uploaded in ${seconds}s`);
     });
-    setUploadProgress(100, "Processing upload");
+    setUploadProgress(100, "Saved. Refreshing gallery");
     uploadInFlight = false;
     closeUploadDialog();
+    focusGalleryOnNewestUploads();
     await refreshAll();
   } catch (err) {
     setNotice("upload-error", err.message);
@@ -1466,14 +1587,19 @@ function ensureLiveControlButtons() {
 function renderLiveChecks(data, silent = false) {
   const status = safeEl("connection-status");
   const checks = data?.checks || [];
+  latestLiveSnapshot = data?.snapshot || latestLiveSnapshot;
   const failing = checks.filter((check) => check.ok === false && check.severity !== "warn");
   const warnings = checks.filter((check) => check.ok === false && check.severity === "warn");
-  const label = !navigator.onLine ? "Offline" : failing.length ? "Attention" : warnings.length ? "Warnings" : "Live";
+  const activePosts = Number(latestLiveSnapshot?.media_active || 0);
+  const label = !navigator.onLine ? "Offline" : failing.length ? "Attention" : warnings.length ? "Warnings" : activePosts ? `Live · ${activePosts}` : "Live";
   if (status) {
     status.textContent = label;
     status.title = checks.map((check) => `${check.label}: ${check.detail}`).join("\n");
     status.dataset.state = failing.length ? "error" : warnings.length ? "warn" : "ok";
     status.hidden = false;
+  }
+  if (!mediaItems.length && !galleryLoading && activePosts && !galleryFiltersActive()) {
+    setTextIfPresent("result-count", `${activePosts} posts live · refresh if they do not appear`);
   }
   const missing = Number(data?.snapshot?.missing_db_files || 0);
   if (!silent && checks.length) {
@@ -1509,7 +1635,7 @@ function startSilentChecks() {
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) runLiveChecks({ silent: true });
   });
-  setInterval(() => runLiveChecks({ silent: true }), 30000);
+  setInterval(() => runLiveChecks({ silent: true }), LIVE_CHECK_INTERVAL_MS);
   setInterval(() => { if (token) refreshMe().catch(() => {}); }, 120000);
 }
 
@@ -1587,13 +1713,13 @@ function bindEvents() {
   if ($("report-close")) $("report-close").addEventListener("click", () => $("report-dialog").close());
   $("clear-tag").addEventListener("click", () => {
     $("search").value = "";
-    loadMedia();
+    loadMedia(1);
   });
   $("tag-cloud").addEventListener("click", (event) => {
     const tagButton = event.target.closest("[data-tag]");
     if (!tagButton) return;
     $("search").value = tagButton.dataset.tag;
-    loadMedia();
+    loadMedia(1);
   });
   $("settings-open").addEventListener("click", () => {
     openCurrentUserDestination(ACCOUNT_NAVIGATION.settingsTarget);
@@ -1616,7 +1742,9 @@ function bindEvents() {
   });
   if ($("upload-title")) $("upload-title").addEventListener("input", checkUploadReadiness);
   $("refresh").addEventListener("click", refreshAll);
-  ["search", "kind-filter", "category-filter", "sort-filter"].forEach((id) => $(id).addEventListener("input", loadMedia));
+  on("gallery-prev", "click", () => loadCurrentGalleryPage(galleryPage - 1, { scrollToTop: true }));
+  on("gallery-next", "click", () => loadCurrentGalleryPage(galleryPage + 1, { scrollToTop: true }));
+  ["search", "kind-filter", "category-filter", "sort-filter"].forEach((id) => $(id).addEventListener("input", () => loadMedia(1)));
   $("gallery-grid").addEventListener("click", async (event) => {
     const open = event.target.closest("[data-open]");
     const profile = event.target.closest("[data-profile]");

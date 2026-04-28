@@ -1099,8 +1099,6 @@ async def upload_media(
                 pass
             raise HTTPException(status_code=503, detail="Database connection reset during upload. Set MariaDB max_allowed_packet to 512M / 536870912 bytes, restart MariaDB, then restart this gallery container.") from None
         raise
-    if media_file.get("duplicate"):
-        raise HTTPException(status_code=409, detail="That exact file is already stored in the gallery database.")
     if media_file["sha256"] != uploaded["sha256"]:
         raise HTTPException(status_code=500, detail="Stored file hash verification failed.")
     item = await db.add_media(

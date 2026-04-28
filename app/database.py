@@ -25,7 +25,7 @@ DEFAULT_USER_SETTINGS = {
     "accent_color": "#37c9a7",
     "grid_density": "comfortable",
     "default_sort": "new",
-    "items_per_page": 60,
+    "items_per_page": 15,
     "autoplay_previews": False,
     "muted_previews": True,
     "reduce_motion": False,
@@ -668,7 +668,7 @@ class GalleryDatabase:
             elif key == "accent_color":
                 settings[key] = self._clean_color(value)
             elif key == "items_per_page":
-                settings[key] = max(12, min(int(value or 60), 100))
+                settings[key] = max(15, min(int(value or 15), 15))
             else:
                 settings[key] = bool(value)
         async with self.pool.acquire() as conn:

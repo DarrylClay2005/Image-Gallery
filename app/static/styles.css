@@ -36,6 +36,7 @@ body[data-blur-videos="1"] .media-preview video { filter: blur(6px); }
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
+html, body { max-width: 100%; overflow-x: hidden; }
 body {
   margin: 0;
   background:
@@ -129,9 +130,10 @@ button:hover, .button-link:hover { border-color: var(--accent); }
   width: min(1500px, calc(100vw - 32px));
   margin: 28px auto;
   display: grid;
-  grid-template-columns: 292px 1fr;
+  grid-template-columns: 292px minmax(0, 1fr);
   gap: 24px;
 }
+.content { min-width: 0; }
 
 .sidebar {
   align-self: start;
@@ -273,11 +275,14 @@ button:hover, .button-link:hover { border-color: var(--accent); }
 .gallery-grid {
   columns: 4 240px;
   column-gap: 18px;
+  max-width: 100%;
+  overflow-x: clip;
 }
 
 .media-card {
   break-inside: avoid;
   margin: 0 0 18px;
+  width: 100%;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -358,6 +363,17 @@ button:hover, .button-link:hover { border-color: var(--accent); }
 }
 .metric-row { color: var(--muted); font-size: 0.82rem; }
 .card-actions button, .card-actions a { min-height: 34px; font-size: 0.86rem; }
+
+.gallery-pagination {
+  margin: 8px 0 18px;
+  padding: 12px 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+.gallery-pagination button { min-width: 112px; }
+.gallery-pagination span { min-width: 90px; text-align: center; }
 
 .empty-state {
   border: 1px dashed var(--line);
