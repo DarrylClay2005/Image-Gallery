@@ -7,7 +7,8 @@ from dotenv import load_dotenv
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT_DIR / ".env")
-load_dotenv(ROOT_DIR.parent / "Music" / ".env", override=False)
+if os.getenv("GALLERY_LOAD_SHARED_MUSIC_ENV", "0").lower() in {"1", "true", "yes", "on"}:
+    load_dotenv(ROOT_DIR.parent / "Music" / ".env", override=False)
 
 
 def _env(name: str, default: str = "") -> str:
@@ -55,7 +56,7 @@ def load_settings() -> Settings:
         db_host=_db_host(),
         db_port=int(_env("GALLERY_DB_PORT", "3306")),
         db_user=_env("GALLERY_DB_USER") or _env("DB_USER") or _env("MYSQL_USER") or "botuser",
-        db_password=_env("GALLERY_DB_PASSWORD") or _env("DB_PASSWORD") or _env("MYSQL_PASSWORD") or "botlogins",
+        db_password=_env("GALLERY_DB_PASSWORD") or _env("DB_PASSWORD") or _env("MYSQL_PASSWORD") or "bot_logins",
         db_schema=_env("GALLERY_DB_SCHEMA", "image_gallery"),
         session_secret=_env("GALLERY_SESSION_SECRET", "change-this-gallery-secret"),
         api_token_ttl_seconds=int(_env("GALLERY_API_TOKEN_TTL_SECONDS", "1209600")),

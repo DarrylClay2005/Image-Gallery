@@ -73,15 +73,24 @@ function readJsonStore(key) {
 }
 
 function apiUrl(path) {
-  return `${apiOrigin}${path}`;
+  const normalized = path.startsWith("/") ? path : `${API_BASE}/${path}`;
+  return `${apiOrigin}${normalized}`;
 }
 
 async function apiFetch(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (token) headers.set("Authorization", `Bearer ${token}`);
-  const response = await fetch(apiUrl(path), { ...options, headers });
+  let response;
+  try {
+    response = await fetch(apiUrl(path), { ...options, headers });
+  } catch (err) {
+    const error = new Error(`Backend unreachable: ${err.message || err}`);
+    error.status = 0;
+    throw error;
+  }
   const text = await response.text();
-  const data = text ? JSON.parse(text) : {};
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch (_err) { data = { detail: text || "Invalid server response" }; }
   if (!response.ok) {
     const error = new Error(data.detail || data.message || "Request failed");
     error.status = response.status;
@@ -141,9 +150,9 @@ function isDesmondUser() {
 
 function applyDesmondVisibility() {
   const canSeePrivateData = isDesmondUser();
-  const status = $("connection-status");
+  const status = safeEl("connection-status");
   const stats = document.querySelector(".stats-grid");
-  if (status) status.hidden = !canSeePrivateData;
+  if (status) status.hidden = false;
   if (stats) stats.hidden = !canSeePrivateData;
 }
 
@@ -204,6 +213,238 @@ function applyAccountSettings() {
   if (currentUser && $("sort-filter").value === "new") $("sort-filter").value = prefs.default_sort || "new";
 }
 
+
+function setRegisterMode(enabled) {
+  registerMode = Boolean(enabled);
+  setNotice("auth-error", "");
+  $("auth-title").textContent = registerMode ? "Create Account" : "Login";
+  $("auth-submit").textContent = registerMode ? "Create Account" : "Login";
+  $("auth-toggle").textContent = registerMode ? "I already have an account" : "Create Account";
+  showIfPresent("display-name-wrap", registerMode);
+  showIfPresent("email-wrap", registerMode);
+  const password = safeEl("auth-password");
+  if (password) password.autocomplete = registerMode ? "new-password" : "current-password";
+}
+
+async function submitAuth(event) {
+  event.preventDefault();
+  setNotice("auth-error", "");
+  const submit = safeEl("auth-submit");
+  setDisabledIfPresent("auth-submit", true);
+  try {
+    const payload = {
+      username: $("auth-username").value.trim(),
+      password: $("auth-password").value,
+    };
+    if (registerMode) {
+      payload.display_name = $("auth-display-name").value.trim() || payload.username;
+      payload.email = $("auth-email").value.trim() || null;
+    }
+    const data = await apiFetch(registerMode ? "/api/auth/register" : "/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    token = data.token || "";
+    currentUser = data.user || null;
+    writeStore(TOKEN_KEY, token);
+    writeStore(USER_KEY, JSON.stringify(currentUser));
+    renderAuth();
+    fillSettingsForm();
+    $("auth-dialog").close();
+    $("auth-form").reset();
+    await refreshAll();
+  } catch (err) {
+    setNotice("auth-error", err.message);
+  } finally {
+    if (submit) submit.disabled = false;
+  }
+}
+
+function fillSettingsForm() {
+  if (!currentUser) return;
+  const prefs = userSettings();
+  const setValue = (id, value) => { const el = safeEl(id); if (el) el.value = value ?? ""; };
+  const setChecked = (id, value) => { const el = safeEl(id); if (el) el.checked = Boolean(value); };
+  setValue("settings-display-name", currentUser.display_name || currentUser.username || "");
+  setValue("settings-email", currentUser.email || "");
+  setValue("settings-profile-color", currentUser.profile_color || prefs.accent_color || "#37c9a7");
+  setValue("settings-website", currentUser.website_url || "");
+  setValue("settings-location", currentUser.location_label || "");
+  setValue("settings-bio", currentUser.bio || "");
+  setChecked("settings-public-profile", currentUser.public_profile !== false);
+  setChecked("settings-show-liked-count", currentUser.show_liked_count !== false);
+  setValue("pref-theme-mode", prefs.theme_mode || "system");
+  setValue("pref-accent-color", prefs.accent_color || "#37c9a7");
+  setValue("pref-grid-density", prefs.grid_density || "comfortable");
+  setValue("pref-default-sort", prefs.default_sort || "new");
+  setValue("pref-items-per-page", prefs.items_per_page || 60);
+  setChecked("pref-autoplay-previews", prefs.autoplay_previews);
+  setChecked("pref-muted-previews", prefs.muted_previews !== false);
+  setChecked("pref-reduce-motion", prefs.reduce_motion);
+  setChecked("pref-open-original", prefs.open_original_in_new_tab);
+  setChecked("pref-blur-video-previews", prefs.blur_video_previews);
+  setTextIfPresent("settings-email-status", currentUser.email ? (currentUser.email_verified ? "Email verified" : "Email verification pending") : "No email set");
+  setTextIfPresent("settings-age-status", currentUser.age_verified ? "Verified" : "Not verified");
+  renderAvatar("settings-avatar-preview", currentUser);
+}
+
+async function submitSettings(event) {
+  event.preventDefault();
+  if (!currentUser) return $("auth-dialog").showModal();
+  setNotice("settings-error", "");
+  try {
+    const profilePayload = {
+      display_name: $("settings-display-name").value.trim() || currentUser.username,
+      bio: $("settings-bio").value.trim() || null,
+      website_url: $("settings-website").value.trim() || null,
+      location_label: $("settings-location").value.trim() || null,
+      profile_color: $("settings-profile-color").value || "#37c9a7",
+      public_profile: $("settings-public-profile").checked,
+      show_liked_count: $("settings-show-liked-count").checked,
+    };
+    let data = await apiFetch("/api/me/profile", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(profilePayload),
+    });
+    currentUser = data.user;
+    const settingsPayload = {
+      theme_mode: $("pref-theme-mode").value,
+      accent_color: $("pref-accent-color").value,
+      grid_density: $("pref-grid-density").value,
+      default_sort: $("pref-default-sort").value,
+      items_per_page: Number($("pref-items-per-page").value || 60),
+      autoplay_previews: $("pref-autoplay-previews").checked,
+      muted_previews: $("pref-muted-previews").checked,
+      reduce_motion: $("pref-reduce-motion").checked,
+      open_original_in_new_tab: $("pref-open-original").checked,
+      blur_video_previews: $("pref-blur-video-previews").checked,
+    };
+    data = await apiFetch("/api/me/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(settingsPayload),
+    });
+    currentUser = data.user;
+    writeStore(USER_KEY, JSON.stringify(currentUser));
+    renderAuth();
+    fillSettingsForm();
+    setNotice("settings-error", "Saved.");
+    await refreshAll();
+  } catch (err) {
+    setNotice("settings-error", err.message);
+  }
+}
+
+async function saveEmailAndSendCode() {
+  if (!currentUser) return;
+  setNotice("settings-error", "");
+  try {
+    const data = await apiFetch("/api/me/email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: $("settings-email").value.trim() || null }),
+    });
+    currentUser = data.user;
+    writeStore(USER_KEY, JSON.stringify(currentUser));
+    renderAuth();
+    fillSettingsForm();
+    setTextIfPresent("settings-email-status", data.email_verification_sent ? "Verification code sent." : "Email saved.");
+  } catch (err) {
+    setNotice("settings-error", err.message);
+  }
+}
+
+async function verifyEmailCode() {
+  if (!currentUser) return;
+  const code = $("settings-email-code").value.trim();
+  if (!code) return setNotice("settings-error", "Enter the email verification code.");
+  try {
+    const data = await apiFetch("/api/me/email/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    currentUser = data.user;
+    writeStore(USER_KEY, JSON.stringify(currentUser));
+    renderAuth();
+    fillSettingsForm();
+    setNotice("settings-error", "Email verified.");
+  } catch (err) {
+    setNotice("settings-error", err.message);
+  }
+}
+
+async function submitAgeVerification(event) {
+  if (event) event.preventDefault();
+  if (!currentUser) return $("auth-dialog").showModal();
+  const fromSettings = event?.currentTarget?.id === "settings-age-save" || event?.currentTarget?.id === "settings-form";
+  const birthdate = (fromSettings ? safeEl("settings-birthdate") : safeEl("age-birthdate"))?.value || safeEl("settings-birthdate")?.value || safeEl("age-birthdate")?.value;
+  const confirm_over_18 = Boolean((fromSettings ? safeEl("settings-age-confirm") : safeEl("age-confirm"))?.checked || safeEl("settings-age-confirm")?.checked || safeEl("age-confirm")?.checked);
+  const noticeId = fromSettings ? "settings-error" : "age-error";
+  try {
+    const data = await apiFetch("/api/me/age-verification", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ birthdate, confirm_over_18 }),
+    });
+    currentUser = data.user;
+    writeStore(USER_KEY, JSON.stringify(currentUser));
+    renderAuth();
+    fillSettingsForm();
+    revealedAdultMedia.clear();
+    if (safeEl("age-dialog")?.open) $("age-dialog").close();
+    setNotice(noticeId, "Age verified.");
+    await refreshAll();
+  } catch (err) {
+    setNotice(noticeId, err.message);
+  }
+}
+
+function toggleNewCategory() {
+  const creating = !safeEl("upload-category")?.value;
+  showIfPresent("new-category-wrap", creating);
+  showIfPresent("new-category-kind-wrap", creating);
+  const name = safeEl("new-category-name");
+  if (name) name.required = creating;
+}
+
+function handleAdultOpen(id) {
+  const numericId = Number(id);
+  const item = mediaItems.find((entry) => Number(entry.id) === numericId)
+    || activeDetail
+    || collectionsState.flatMap((collection) => collection.items || []).find((entry) => Number(entry.id) === numericId);
+  if (!item?.is_adult) return false;
+  if (!currentUser || !currentUser.age_verified || !item.url) {
+    openAgeDialog("Verify your age to view this 18+ post.");
+    return true;
+  }
+  if (!revealedAdultMedia.has(numericId)) {
+    revealedAdultMedia.add(numericId);
+    renderMediaGrid();
+    return true;
+  }
+  return false;
+}
+
+async function copyAddress(id) {
+  const numericId = Number(id);
+  const item = mediaItems.find((entry) => Number(entry.id) === numericId) || activeDetail;
+  const url = item?.url || (item?.id ? apiUrl(`/api/media/${item.id}/file`) : "");
+  if (!url) return;
+  try {
+    await navigator.clipboard.writeText(url);
+  } catch (_err) {
+    const temp = document.createElement("input");
+    temp.value = url;
+    document.body.appendChild(temp);
+    temp.select();
+    document.execCommand("copy");
+    temp.remove();
+  }
+}
+
 async function refreshMe() {
   if (!token) return;
   let data;
@@ -227,21 +468,34 @@ async function refreshMe() {
 }
 
 async function initApiOrigin() {
+  const status = safeEl("connection-status");
   if (!REMOTE_MODE) {
     apiOrigin = "";
-    $("connection-status").textContent = "Local";
+    if (status) status.textContent = "Local";
     applyDesmondVisibility();
-    return;
+    return true;
   }
   try {
-    const response = await fetch(CONFIG_FILE, { cache: "no-store" });
+    const response = await fetch(`${CONFIG_FILE}?t=${Date.now()}`, { cache: "no-store" });
+    if (!response.ok) throw new Error(`Config HTTP ${response.status}`);
     const config = await response.json();
     apiOrigin = String(config.gallery_url || "").replace(/\/$/, "");
-    $("connection-status").textContent = apiOrigin ? "Live" : "No backend";
-  } catch (_err) {
-    $("connection-status").textContent = "No backend";
+    if (!apiOrigin) throw new Error("live-config.json has no gallery_url");
+    if (status) status.textContent = "Live";
+    applyDesmondVisibility();
+    return true;
+  } catch (err) {
+    apiOrigin = "";
+    if (status) {
+      status.textContent = "No backend";
+      status.dataset.state = "error";
+      status.title = err.message || String(err);
+    }
+    setTextIfPresent("result-count", `Backend config failed: ${err.message || err}`);
+    showIfPresent("empty-state", true);
+    applyDesmondVisibility();
+    return false;
   }
-  applyDesmondVisibility();
 }
 
 async function refreshAll() {
@@ -427,7 +681,7 @@ async function toggleLike(id, liked = null) {
     $("detail-like").textContent = updated.liked_by_me ? "Unlike" : "Like";
     $("detail-meta").textContent = `${updated.category_name} by ${updated.display_name || updated.username} - ${formatBytes(updated.file_size)} - ${updated.like_count || 0} likes`;
   }
-  await loadStats();
+  if (isDesmondUser()) await loadStats().catch(() => {});
 }
 
 async function openSurprise() {
@@ -766,7 +1020,7 @@ function ensureLiveControlButtons() {
   };
   addButton("following-feed", "Following", loadFollowingFeed);
   addButton("liked-feed", "Liked", loadLikedFeed);
-  addButton("live-checks-open", "Checks", runLiveChecks);
+  addButton("live-checks-open", "Checks", () => runLiveChecks({ silent: false }));
 }
 
 function renderLiveChecks(data, silent = false) {
@@ -849,6 +1103,9 @@ function bindEvents() {
   $("settings-email-save").addEventListener("click", saveEmailAndSendCode);
   $("settings-email-verify").addEventListener("click", verifyEmailCode);
   $("surprise-open").addEventListener("click", openSurprise);
+  on("following-feed", "click", loadFollowingFeed);
+  on("liked-feed", "click", loadLikedFeed);
+  on("live-checks-open", "click", () => runLiveChecks({ silent: false }));
   $("collections-open").addEventListener("click", openCollectionsDialog);
   $("collections-close").addEventListener("click", () => $("collections-dialog").close());
   $("collection-form").addEventListener("submit", createCollection);
@@ -949,8 +1206,8 @@ async function boot() {
   bindEvents();
   renderAuth();
   startSilentChecks();
-  await initApiOrigin();
-  if (REMOTE_MODE && !apiOrigin) return;
+  const hasBackendConfig = await initApiOrigin();
+  if (REMOTE_MODE && !hasBackendConfig) return;
   try {
     if (token) await refreshMe();
     await refreshAll();

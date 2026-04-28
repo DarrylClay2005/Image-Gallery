@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PORT="${1:-8788}"
+PORT="${GALLERY_BACKEND_PORT:-8788}"
+if [[ "${GALLERY_KILL_STALE_PORT:-1}" == "1" ]]; then
+  if command -v fuser >/dev/null 2>&1; then
+    fuser -k "${PORT}/tcp" >/dev/null 2>&1 || true
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -ti tcp:"${PORT}" | xargs -r kill -TERM || true
+  fi
+fi
+
+PORT="${1:-${PORT}}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_DIR="${ROOT_DIR}/.venv"
 BIN_DIR="${ROOT_DIR}/.bin"
