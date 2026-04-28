@@ -675,7 +675,7 @@ class GalleryDatabase:
                 )
                 return list(await cur.fetchall())
 
-    async def save_media_file(self, *, user_id: int, content: bytes, sha256: str, mime_type: str, original_filename: str, media_kind: str) -> dict[str, Any]:
+    async def save_media_file(self, *, user_id: int, content: bytes, sha256: str, mime_type: str, original_filename: str, media_kind: str, file_size: int | None = None) -> dict[str, Any]:
         # BLOB inserts are packet-heavy. Serialize these writes so live migration and
         # user uploads cannot corrupt an aiomysql connection with interleaved packets.
         async with self._blob_lock:
@@ -694,7 +694,7 @@ class GalleryDatabase:
                         INSERT INTO media_files (sha256, mime_type, original_filename, media_kind, file_size, content, created_by)
                         VALUES (%s, %s, %s, %s, %s, %s, %s)
                         """,
-                        (sha256, mime_type[:120], original_filename[:255], media_kind, len(content), content, user_id),
+                        (sha256, mime_type[:120], original_filename[:255], media_kind, file_size or len(content), content, user_id),
                     )
                     await cur.execute(
                         "SELECT id, sha256, mime_type, original_filename, media_kind, file_size, created_by, created_at FROM media_files WHERE id=%s",

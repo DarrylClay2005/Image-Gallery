@@ -942,7 +942,7 @@ async def upload_media(
         )
     media_kind = uploaded["media_kind"]
     try:
-        media_file = await db.save_media_file(user_id=int(auth["id"]), **uploaded)
+        media_file = await db.save_media_file(user_id=int(auth["id"]), content=uploaded["content"], sha256=uploaded["sha256"], mime_type=uploaded["mime_type"], original_filename=uploaded["original_filename"], media_kind=uploaded["media_kind"])
     except Exception as exc:
         if "Packet sequence number wrong" in str(exc):
             try:
