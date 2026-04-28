@@ -4,6 +4,7 @@ import os
 import re
 import secrets
 import hashlib
+import hmac
 import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime
@@ -188,7 +189,44 @@ def _age_from_birthdate(birthdate: date) -> int:
 def _public_url(request: Request, storage_path: str, media_id: int | None = None) -> str:
     if media_id is not None:
         return str(request.url_for("serve_media_file", media_id=media_id))
-    return str(request.url_for("uploads", path=storage_path))
+    return str(request.url_for("serve_legacy_upload", path=storage_path))
+
+
+def _media_access_token(media_id: int) -> str:
+    msg = str(int(media_id)).encode("utf-8")
+    return hmac.new(settings.session_secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+
+
+def _valid_media_access_token(media_id: int, token: str | None) -> bool:
+    return bool(token) and hmac.compare_digest(str(token), _media_access_token(media_id))
+
+
+def _append_query(url: str, key: str, value: str) -> str:
+    return f"{url}{'&' if '?' in url else '?'}{key}={value}"
+
+
+def _legacy_upload_path(storage_path: str | None) -> Path | None:
+    if not storage_path or str(storage_path).startswith(("db://", "avatar-db://")):
+        return None
+    raw = str(storage_path).replace("\\", "/").lstrip("/")
+    if ".." in Path(raw).parts:
+        return None
+    path = (settings.uploads_dir / raw).resolve()
+    try:
+        path.relative_to(settings.uploads_dir.resolve())
+    except ValueError:
+        return None
+    return path if path.is_file() else None
+
+
+def _fallback_avatar_svg(user_id: int) -> str:
+    initials = f"U{int(user_id)}"[:3]
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">'
+        '<rect width="128" height="128" rx="64" fill="#202832"/>'
+        '<text x="64" y="74" text-anchor="middle" font-family="Inter,Arial,sans-serif" '
+        'font-size="34" font-weight="800" fill="#9ba8b7">' + html.escape(initials) + '</text></svg>'
+    )
 
 
 def _verification_url(request: Request, token: str) -> str:
@@ -236,8 +274,13 @@ def _with_urls(request: Request, item: dict[str, Any] | None, adult_allowed: boo
         clone["url"] = None
         clone["download_url"] = None
     else:
-        clone["url"] = _public_url(request, clone.get("storage_path", ""), int(clone["id"]))
-        clone["download_url"] = str(request.url_for("download_media", media_id=clone["id"]))
+        media_id = int(clone["id"])
+        clone["url"] = _public_url(request, clone.get("storage_path", ""), media_id)
+        clone["download_url"] = str(request.url_for("download_media", media_id=media_id))
+        if clone.get("is_adult") and adult_allowed:
+            token = _media_access_token(media_id)
+            clone["url"] = _append_query(clone["url"], "access", token)
+            clone["download_url"] = _append_query(clone["download_url"], "access", token)
     if clone.get("user_avatar_path"):
         clone["user_avatar_url"] = str(request.url_for("serve_user_avatar", user_id=clone.get("user_id") or clone.get("id")))
     return _jsonable(clone)
@@ -415,6 +458,15 @@ app.mount("/app/static", StaticFiles(directory=ROOT_DIR / "app" / "static"), nam
 @app.get("/")
 async def index() -> FileResponse:
     return FileResponse(ROOT_DIR / "index.html")
+
+
+@app.get("/api/uploads/{path:path}", name="serve_legacy_upload")
+async def serve_legacy_upload(path: str) -> FileResponse:
+    legacy = _legacy_upload_path(path)
+    if not legacy:
+        raise HTTPException(status_code=404, detail="Legacy upload not found.")
+    media_type = mimetypes.guess_type(str(legacy))[0] or "application/octet-stream"
+    return FileResponse(legacy, media_type=media_type, headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/api/health")
@@ -877,57 +929,80 @@ async def delete_media(media_id: int, request: Request) -> dict[str, Any]:
     return {"deleted": True}
 
 
-@app.get("/api/media/{media_id}/file", name="serve_media_file")
-async def serve_media_file(media_id: int, request: Request) -> Response:
+async def _adult_file_allowed(request: Request, media_id: int, access: str | None) -> bool:
+    # Browser <img>/<video> requests do not carry Authorization headers.
+    # Age-verified API responses include this signed token in adult media URLs.
+    return _valid_media_access_token(media_id, access) or await _viewer_can_open_adult(request)
+
+
+async def _serve_media_content(media_id: int, request: Request, *, access: str | None, as_download: bool) -> Response:
     viewer_id = _user_id(_auth_optional(request))
     item = await db.get_media(media_id, viewer_id)
     if not item:
         raise HTTPException(status_code=404, detail="Media not found.")
-    if item.get("is_adult") and not await _viewer_can_open_adult(request):
+    if item.get("is_adult") and not await _adult_file_allowed(request, media_id, access):
         raise HTTPException(status_code=403, detail="Age verification required for this 18+ post.")
+
     file_row = await db.get_media_file(media_id)
-    if not file_row:
-        raise HTTPException(status_code=404, detail="File missing from database.")
-    digest = hashlib.sha256(file_row["content"]).hexdigest()
-    if digest != file_row["sha256"]:
-        raise HTTPException(status_code=500, detail="Stored file failed hash verification.")
-    return Response(content=file_row["content"], media_type=file_row["mime_type"], headers={"Cache-Control": "public, max-age=86400", "X-Content-SHA256": digest})
+    if file_row:
+        digest = hashlib.sha256(file_row["content"]).hexdigest()
+        if digest != file_row["sha256"]:
+            raise HTTPException(status_code=500, detail="Stored file failed hash verification.")
+        headers = {"X-Content-SHA256": digest}
+        if as_download:
+            await db.increment_counter(media_id, "downloads")
+            headers["Content-Disposition"] = f'attachment; filename="{file_row["original_filename"]}"'
+        else:
+            headers["Cache-Control"] = "public, max-age=86400"
+        return Response(content=file_row["content"], media_type=file_row["mime_type"], headers=headers)
+
+    legacy = _legacy_upload_path(item.get("storage_path"))
+    if legacy:
+        if as_download:
+            await db.increment_counter(media_id, "downloads")
+        return FileResponse(
+            legacy,
+            media_type=item.get("mime_type") or mimetypes.guess_type(str(legacy))[0] or "application/octet-stream",
+            filename=item.get("original_filename") if as_download else None,
+            headers={"Cache-Control": "public, max-age=86400"} if not as_download else None,
+        )
+
+    raise HTTPException(
+        status_code=404,
+        detail="File is missing. Re-upload this post once so it can be saved into the new DB-backed file store.",
+    )
+
+
+@app.get("/api/media/{media_id}/file", name="serve_media_file")
+async def serve_media_file(media_id: int, request: Request, access: str | None = None) -> Response:
+    return await _serve_media_content(media_id, request, access=access, as_download=False)
 
 
 @app.get("/api/users/{user_id}/avatar", name="serve_user_avatar")
 async def serve_user_avatar(user_id: int) -> Response:
     file_row = await db.get_avatar_file(user_id)
-    if not file_row:
-        raise HTTPException(status_code=404, detail="Avatar not found.")
-    digest = hashlib.sha256(file_row["content"]).hexdigest()
-    if digest != file_row["sha256"]:
-        raise HTTPException(status_code=500, detail="Stored avatar failed hash verification.")
-    return Response(content=file_row["content"], media_type=file_row["mime_type"], headers={"Cache-Control": "public, max-age=86400", "X-Content-SHA256": digest})
+    if file_row:
+        digest = hashlib.sha256(file_row["content"]).hexdigest()
+        if digest != file_row["sha256"]:
+            raise HTTPException(status_code=500, detail="Stored avatar failed hash verification.")
+        return Response(content=file_row["content"], media_type=file_row["mime_type"], headers={"Cache-Control": "public, max-age=86400", "X-Content-SHA256": digest})
+
+    user = await db.get_user(user_id)
+    legacy = _legacy_upload_path(user.get("avatar_path") if user else None)
+    if legacy:
+        return FileResponse(
+            legacy,
+            media_type=(user.get("avatar_mime_type") if user else None) or mimetypes.guess_type(str(legacy))[0] or "image/jpeg",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    # Avoid repeated browser 404 spam for accounts that have no uploaded avatar yet.
+    return Response(content=_fallback_avatar_svg(user_id), media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=3600"})
 
 
 @app.get("/api/media/{media_id}/download", name="download_media")
-async def download_media(media_id: int, request: Request) -> Response:
-    viewer_id = _user_id(_auth_optional(request))
-    item = await db.get_media(media_id, viewer_id)
-    if not item:
-        raise HTTPException(status_code=404, detail="Media not found.")
-    if item.get("is_adult") and not await _viewer_can_open_adult(request):
-        raise HTTPException(status_code=403, detail="Age verification required for this 18+ post.")
-    file_row = await db.get_media_file(media_id)
-    if not file_row:
-        raise HTTPException(status_code=404, detail="File missing from database.")
-    digest = hashlib.sha256(file_row["content"]).hexdigest()
-    if digest != file_row["sha256"]:
-        raise HTTPException(status_code=500, detail="Stored file failed hash verification.")
-    await db.increment_counter(media_id, "downloads")
-    return Response(
-        content=file_row["content"],
-        media_type=file_row["mime_type"],
-        headers={
-            "Content-Disposition": f'attachment; filename="{file_row["original_filename"]}"',
-            "X-Content-SHA256": digest,
-        },
-    )
+async def download_media(media_id: int, request: Request, access: str | None = None) -> Response:
+    return await _serve_media_content(media_id, request, access=access, as_download=True)
 
 
 @app.get("/api/stats")
