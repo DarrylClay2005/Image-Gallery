@@ -482,7 +482,54 @@ async def serve_legacy_upload(path: str) -> FileResponse:
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "schema": settings.db_schema, "max_upload_bytes": settings.max_upload_bytes}
+    return {"ok": True, "schema": settings.db_schema, "max_upload_bytes": settings.max_upload_bytes, "server_time": datetime.utcnow().isoformat() + "Z"}
+
+
+@app.get("/api/live/checks")
+async def live_checks(request: Request) -> dict[str, Any]:
+    auth = _auth_optional(request)
+    checks: list[dict[str, Any]] = []
+    try:
+        snapshot = await db.site_checks()
+        checks.append({"id": "api", "label": "API reachable", "ok": True, "detail": "Backend responded."})
+        checks.append({"id": "db", "label": "Database reachable", "ok": True, "detail": f"Schema {settings.db_schema} responded."})
+        missing = int(snapshot.get("missing_db_files") or 0)
+        checks.append({
+            "id": "file_store",
+            "label": "DB file store coverage",
+            "ok": missing == 0,
+            "severity": "warn" if missing else "ok",
+            "detail": "All active posts are linked to DB file blobs." if missing == 0 else f"{missing} active post(s) still need DB blob migration or legacy disk fallback.",
+        })
+        reports = int(snapshot.get("open_reports") or 0)
+        checks.append({
+            "id": "reports",
+            "label": "Open reports",
+            "ok": reports == 0,
+            "severity": "warn" if reports else "ok",
+            "detail": "No open user reports." if reports == 0 else f"{reports} report(s) need review.",
+        })
+        if auth:
+            user = await db.get_user(int(auth["id"]))
+            checks.append({"id": "session", "label": "Login session", "ok": bool(user), "detail": "Signed in." if user else "Token is invalid or account is gone."})
+            if user and user.get("email"):
+                checks.append({
+                    "id": "email",
+                    "label": "Email verification",
+                    "ok": bool(user.get("email_verified_at")),
+                    "severity": "warn" if not user.get("email_verified_at") else "ok",
+                    "detail": "Email verified." if user.get("email_verified_at") else "Email verification is still pending.",
+                })
+        status = "ok" if all(c.get("ok") or c.get("severity") == "warn" for c in checks) else "attention"
+        return {"ok": True, "status": status, "checks": checks, "snapshot": _jsonable(snapshot), "server_time": datetime.utcnow().isoformat() + "Z"}
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "offline",
+            "checks": [{"id": "db", "label": "Database reachable", "ok": False, "severity": "error", "detail": str(exc)[:240]}],
+            "snapshot": {},
+            "server_time": datetime.utcnow().isoformat() + "Z",
+        }
 
 
 @app.post("/api/auth/register")
@@ -687,6 +734,36 @@ async def follow_user(user_id: int, payload: FollowRequest, request: Request) ->
     if not result:
         raise HTTPException(status_code=404, detail="User not found.")
     return result
+
+
+@app.get("/api/feed/following")
+async def following_feed(request: Request, limit: int = 60, offset: int = 0) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    adult_allowed = await _viewer_can_open_adult(request)
+    items = await db.following_feed(int(auth["id"]), limit=limit, offset=offset)
+    return {"media": [_with_urls(request, item, adult_allowed) for item in items], "limit": limit, "offset": offset}
+
+
+@app.get("/api/me/likes")
+async def my_likes(request: Request, limit: int = 80, offset: int = 0) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    adult_allowed = await _viewer_can_open_adult(request)
+    items = await db.list_liked_media(int(auth["id"]), limit=limit, offset=offset)
+    return {"media": [_with_urls(request, item, adult_allowed) for item in items], "limit": limit, "offset": offset}
+
+
+@app.get("/api/users/{user_id}/followers")
+async def user_followers(user_id: int, request: Request) -> dict[str, Any]:
+    viewer_id = _user_id(_auth_optional(request))
+    users = await db.list_user_follows(user_id, mode="followers", viewer_id=viewer_id)
+    return {"users": [_with_user_urls(request, user) for user in users]}
+
+
+@app.get("/api/users/{user_id}/following")
+async def user_following(user_id: int, request: Request) -> dict[str, Any]:
+    viewer_id = _user_id(_auth_optional(request))
+    users = await db.list_user_follows(user_id, mode="following", viewer_id=viewer_id)
+    return {"users": [_with_user_urls(request, user) for user in users]}
 
 @app.get("/api/categories")
 async def categories() -> dict[str, Any]:

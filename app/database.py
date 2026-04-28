@@ -1452,6 +1452,55 @@ class GalleryDatabase:
                 )
                 return await cur.fetchone()
 
+
+    async def site_checks(self) -> dict[str, Any]:
+        """Lightweight operational checks used by the live site status panel.
+
+        These checks avoid touching BLOB contents so the endpoint stays cheap.
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT CURRENT_TIMESTAMP AS db_time")
+                db_time = (await cur.fetchone() or {}).get("db_time")
+                await cur.execute("SELECT COUNT(*) AS n FROM users")
+                users = int((await cur.fetchone() or {}).get("n") or 0)
+                await cur.execute("SELECT COUNT(*) AS n FROM media_items")
+                media_total = int((await cur.fetchone() or {}).get("n") or 0)
+                await cur.execute("SELECT COUNT(*) AS n FROM media_items WHERE deleted_at IS NULL")
+                media_active = int((await cur.fetchone() or {}).get("n") or 0)
+                await cur.execute("SELECT COUNT(*) AS n FROM media_items WHERE deleted_at IS NOT NULL")
+                media_archived = int((await cur.fetchone() or {}).get("n") or 0)
+                await cur.execute("SELECT COUNT(*) AS n FROM media_files")
+                db_files = int((await cur.fetchone() or {}).get("n") or 0)
+                await cur.execute(
+                    """
+                    SELECT COUNT(*) AS n FROM media_items
+                    WHERE deleted_at IS NULL AND (media_file_id IS NULL OR media_file_id=0)
+                    """
+                )
+                missing_db_files = int((await cur.fetchone() or {}).get("n") or 0)
+                await cur.execute("SELECT COUNT(*) AS n FROM media_items WHERE visibility='private' AND deleted_at IS NULL")
+                private_posts = int((await cur.fetchone() or {}).get("n") or 0)
+                await cur.execute("SELECT COUNT(*) AS n FROM media_items WHERE comments_enabled=0 AND deleted_at IS NULL")
+                comments_disabled = int((await cur.fetchone() or {}).get("n") or 0)
+                await cur.execute("SELECT COUNT(*) AS n FROM media_items WHERE downloads_enabled=0 AND deleted_at IS NULL")
+                downloads_disabled = int((await cur.fetchone() or {}).get("n") or 0)
+                await cur.execute("SELECT COUNT(*) AS n FROM media_reports WHERE status='open'")
+                open_reports = int((await cur.fetchone() or {}).get("n") or 0)
+                return {
+                    "db_time": db_time,
+                    "users": users,
+                    "media_total": media_total,
+                    "media_active": media_active,
+                    "media_archived": media_archived,
+                    "db_files": db_files,
+                    "missing_db_files": missing_db_files,
+                    "private_posts": private_posts,
+                    "comments_disabled": comments_disabled,
+                    "downloads_disabled": downloads_disabled,
+                    "open_reports": open_reports,
+                }
+
     def _decode_media(self, row: dict[str, Any]) -> dict[str, Any]:
         tags = row.get("tags")
         if isinstance(tags, str):

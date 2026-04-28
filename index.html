@@ -17,6 +17,9 @@
       <span id="connection-status" class="status-pill" hidden>Connecting</span>
       <button id="surprise-open" type="button">Surprise</button>
       <button id="collections-open" type="button">Collections</button>
+      <button id="following-feed" type="button">Following</button>
+      <button id="liked-feed" type="button">Liked</button>
+      <button id="live-checks-open" type="button">Checks</button>
       <button id="studio-open" type="button" hidden>Studio</button>
       <button id="upload-open" class="primary" type="button">Upload</button>
       <button id="settings-open" type="button" hidden>Settings</button>
@@ -392,6 +395,19 @@
         <input id="upload-adult" name="is_adult" type="checkbox" />
         <span>Mark this upload as 18+</span>
       </label>
+      <div class="upload-controls-grid">
+        <label class="field">
+          <span>Visibility</span>
+          <select id="upload-visibility">
+            <option value="public">Public - appears in the gallery</option>
+            <option value="unlisted">Unlisted - link/profile only</option>
+            <option value="private">Private - only me</option>
+          </select>
+        </label>
+        <label class="check-row"><input id="upload-comments-enabled" type="checkbox" checked /> Allow comments</label>
+        <label class="check-row"><input id="upload-downloads-enabled" type="checkbox" checked /> Allow downloads</label>
+        <label class="check-row"><input id="upload-pinned" type="checkbox" /> Pin in my studio/feed</label>
+      </div>
       <div class="modal-actions">
         <button class="primary" type="submit">Post</button>
       </div>
@@ -431,6 +447,6 @@
     </div>
   </dialog>
 
-  <script src="./app/static/final_app.js?v=3"></script>
+  <script src="./app/static/final_app.js?v=4"></script>
 </body>
 </html>

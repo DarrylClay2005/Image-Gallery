@@ -31,6 +31,32 @@ const revealedAdultMedia = new Set();
 
 const $ = (id) => document.getElementById(id);
 
+function safeEl(id) {
+  return document.getElementById(id);
+}
+
+function on(id, eventName, handler) {
+  const el = safeEl(id);
+  if (el) el.addEventListener(eventName, handler);
+  return el;
+}
+
+function setTextIfPresent(id, value) {
+  const el = safeEl(id);
+  if (el) el.textContent = value;
+}
+
+function showIfPresent(id, visible) {
+  const el = safeEl(id);
+  if (el) el.hidden = !visible;
+}
+
+function setDisabledIfPresent(id, disabled) {
+  const el = safeEl(id);
+  if (el) el.disabled = Boolean(disabled);
+}
+
+
 function readStore(key) {
   try { return localStorage.getItem(key) || ""; } catch (_err) { return ""; }
 }
@@ -620,229 +646,10 @@ async function submitReport(event) {
         details: $("report-details").value,
       }),
     });
-    $("report-form").reset();
+    setNotice("report-error", "Report sent.");
     $("report-dialog").close();
   } catch (err) {
     setNotice("report-error", err.message);
-  }
-}
-
-async function copyAddress(id) {
-  const item = mediaItems.find((entry) => Number(entry.id) === Number(id)) || activeDetail;
-  if (!item) return;
-  if (!item.url) return openAgeDialog("Verify your age to copy the address for this 18+ post.");
-  await navigator.clipboard.writeText(item.url);
-}
-
-function handleAdultOpen(id) {
-  const item = mediaItems.find((entry) => Number(entry.id) === Number(id)) || activeDetail;
-  if (!item?.is_adult) return false;
-  if (!canRevealAdult(item)) {
-    openAgeDialog("Verify your age to view this 18+ post.");
-    return true;
-  }
-  if (!revealedAdultMedia.has(Number(id))) {
-    revealedAdultMedia.add(Number(id));
-    renderMediaGrid();
-    return true;
-  }
-  return false;
-}
-
-function toggleNewCategory() {
-  const creating = !$("upload-category").value;
-  $("new-category-wrap").hidden = !creating;
-  $("new-category-kind-wrap").hidden = !creating;
-  $("new-category-name").required = creating;
-}
-
-function setRegisterMode(next) {
-  registerMode = next;
-  $("auth-title").textContent = next ? "Create Account" : "Login";
-  $("auth-submit").textContent = next ? "Create Account" : "Login";
-  $("auth-toggle").textContent = next ? "Use Login" : "Create Account";
-  $("display-name-wrap").hidden = !next;
-  $("email-wrap").hidden = !next;
-}
-
-async function submitAuth(event) {
-  event.preventDefault();
-  setNotice("auth-error", "");
-  try {
-    const payload = {
-      username: $("auth-username").value.trim(),
-      password: $("auth-password").value,
-    };
-    if (registerMode) {
-      payload.display_name = $("auth-display-name").value.trim();
-      payload.email = $("auth-email").value.trim();
-    }
-    const data = await apiFetch(registerMode ? "/api/auth/register" : "/api/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    token = data.token;
-    currentUser = data.user;
-    writeStore(TOKEN_KEY, token);
-    writeStore(USER_KEY, JSON.stringify(currentUser));
-    renderAuth();
-    await refreshMe();
-    if (registerMode && payload.email) {
-      setNotice(
-        "auth-error",
-        data.email_verification_sent
-          ? "Account created. Check your email for the verification code."
-          : "Account created, but the verification email could not be sent. Check SMTP settings, then resend from your account card.",
-      );
-    }
-    $("auth-dialog").close();
-    await refreshAll();
-  } catch (err) {
-    setNotice("auth-error", err.message);
-  }
-}
-
-function fillSettingsForm() {
-  if (!currentUser) return;
-  const prefs = userSettings();
-  $("settings-display-name").value = currentUser.display_name || currentUser.username || "";
-  $("settings-email").value = currentUser.email || "";
-  $("settings-email-code").value = "";
-  $("settings-email-status").textContent = currentUser.email
-    ? currentUser.email_verified
-      ? "Email verified"
-      : "Email not verified"
-    : "No email set";
-  $("settings-bio").value = currentUser.bio || "";
-  $("settings-website").value = currentUser.website_url || "";
-  $("settings-location").value = currentUser.location_label || "";
-  $("settings-profile-color").value = currentUser.profile_color || "#37c9a7";
-  $("settings-public-profile").checked = currentUser.public_profile !== false;
-  $("settings-show-liked-count").checked = currentUser.show_liked_count !== false;
-  $("pref-theme-mode").value = prefs.theme_mode;
-  $("pref-accent-color").value = prefs.accent_color;
-  $("pref-grid-density").value = prefs.grid_density;
-  $("pref-default-sort").value = prefs.default_sort;
-  $("pref-items-per-page").value = prefs.items_per_page;
-  $("pref-autoplay-previews").checked = Boolean(prefs.autoplay_previews);
-  $("pref-muted-previews").checked = Boolean(prefs.muted_previews);
-  $("pref-reduce-motion").checked = Boolean(prefs.reduce_motion);
-  $("pref-open-original").checked = Boolean(prefs.open_original_in_new_tab);
-  $("pref-blur-video-previews").checked = Boolean(prefs.blur_video_previews);
-  $("settings-age-status").textContent = currentUser.age_verified ? "Verified for 18+ posts" : "Not verified";
-  renderAvatar("settings-avatar-preview", currentUser);
-}
-
-async function saveEmailAndSendCode() {
-  if (!currentUser) return;
-  setNotice("settings-error", "");
-  try {
-    const data = await apiFetch("/api/me/email", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: $("settings-email").value.trim() || null }),
-    });
-    currentUser = data.user;
-    writeStore(USER_KEY, JSON.stringify(currentUser));
-    renderAuth();
-    fillSettingsForm();
-    $("settings-email-status").textContent = currentUser.email
-      ? data.email_verification_sent
-        ? "Verification code sent. Enter it below."
-        : "Email saved, but the verification code could not be sent."
-      : "Email removed.";
-  } catch (err) {
-    setNotice("settings-error", err.message);
-  }
-}
-
-async function verifyEmailCode() {
-  if (!currentUser) return;
-  setNotice("settings-error", "");
-  try {
-    const data = await apiFetch("/api/me/email/verify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code: $("settings-email-code").value.trim() }),
-    });
-    currentUser = data.user;
-    writeStore(USER_KEY, JSON.stringify(currentUser));
-    renderAuth();
-    fillSettingsForm();
-    $("settings-email-status").textContent = "Email verified.";
-  } catch (err) {
-    setNotice("settings-error", err.message);
-  }
-}
-
-async function submitAgeVerification(event) {
-  event.preventDefault();
-  if (!currentUser) return $("auth-dialog").showModal();
-  const inSettings = event.currentTarget.id === "settings-age-save";
-  const birthdate = $(inSettings ? "settings-birthdate" : "age-birthdate").value;
-  const confirmed = $(inSettings ? "settings-age-confirm" : "age-confirm").checked;
-  const noticeId = inSettings ? "settings-error" : "age-error";
-  setNotice(noticeId, "");
-  try {
-    const data = await apiFetch("/api/me/age-verification", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ birthdate, confirm_over_18: confirmed }),
-    });
-    currentUser = data.user;
-    writeStore(USER_KEY, JSON.stringify(currentUser));
-    renderAuth();
-    fillSettingsForm();
-    if ($("age-dialog").open) $("age-dialog").close();
-    await refreshAll();
-  } catch (err) {
-    setNotice(noticeId, err.message);
-  }
-}
-
-async function submitSettings(event) {
-  event.preventDefault();
-  if (!currentUser) return;
-  setNotice("settings-error", "");
-  try {
-    let data = await apiFetch("/api/me/profile", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        display_name: $("settings-display-name").value,
-        bio: $("settings-bio").value,
-        website_url: $("settings-website").value,
-        location_label: $("settings-location").value,
-        profile_color: $("settings-profile-color").value,
-        public_profile: $("settings-public-profile").checked,
-        show_liked_count: $("settings-show-liked-count").checked,
-      }),
-    });
-    currentUser = data.user;
-    data = await apiFetch("/api/me/settings", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        theme_mode: $("pref-theme-mode").value,
-        accent_color: $("pref-accent-color").value,
-        grid_density: $("pref-grid-density").value,
-        default_sort: $("pref-default-sort").value,
-        items_per_page: Number($("pref-items-per-page").value || 60),
-        autoplay_previews: $("pref-autoplay-previews").checked,
-        muted_previews: $("pref-muted-previews").checked,
-        reduce_motion: $("pref-reduce-motion").checked,
-        open_original_in_new_tab: $("pref-open-original").checked,
-        blur_video_previews: $("pref-blur-video-previews").checked,
-      }),
-    });
-    currentUser = data.user;
-    writeStore(USER_KEY, JSON.stringify(currentUser));
-    renderAuth();
-    $("settings-dialog").close();
-    await loadMedia();
-  } catch (err) {
-    setNotice("settings-error", err.message);
   }
 }
 
@@ -944,8 +751,89 @@ async function resendEmailVerification() {
   }
 }
 
+
+function ensureLiveControlButtons() {
+  const refresh = safeEl("refresh");
+  const parent = refresh?.parentElement || document.querySelector(".topbar-actions") || document.body;
+  const addButton = (id, text, handler) => {
+    if (safeEl(id)) return;
+    const button = document.createElement("button");
+    button.id = id;
+    button.type = "button";
+    button.textContent = text;
+    button.addEventListener("click", handler);
+    parent.insertBefore(button, refresh?.nextSibling || null);
+  };
+  addButton("following-feed", "Following", loadFollowingFeed);
+  addButton("liked-feed", "Liked", loadLikedFeed);
+  addButton("live-checks-open", "Checks", runLiveChecks);
+}
+
+function renderLiveChecks(data, silent = false) {
+  const status = safeEl("connection-status");
+  const checks = data?.checks || [];
+  const failing = checks.filter((check) => check.ok === false && check.severity !== "warn");
+  const warnings = checks.filter((check) => check.ok === false && check.severity === "warn");
+  const label = !navigator.onLine ? "Offline" : failing.length ? "Attention" : warnings.length ? "Warnings" : "Live";
+  if (status) {
+    status.textContent = label;
+    status.title = checks.map((check) => `${check.label}: ${check.detail}`).join("\n");
+    status.dataset.state = failing.length ? "error" : warnings.length ? "warn" : "ok";
+    status.hidden = false;
+  }
+  if (!silent && checks.length) {
+    alert(checks.map((check) => `${check.ok ? "✓" : check.severity === "warn" ? "!" : "✕"} ${check.label}: ${check.detail}`).join("\n"));
+  }
+}
+
+async function runLiveChecks({ silent = false } = {}) {
+  if (!navigator.onLine) {
+    renderLiveChecks({ checks: [{ label: "Browser network", ok: false, severity: "error", detail: "Your browser reports no internet connection." }] }, silent);
+    return;
+  }
+  try {
+    const data = await apiFetch("/api/live/checks");
+    renderLiveChecks(data, silent);
+    return data;
+  } catch (err) {
+    renderLiveChecks({ checks: [{ label: "Backend", ok: false, severity: "error", detail: err.message }] }, silent);
+  }
+}
+
+function startSilentChecks() {
+  window.addEventListener("online", () => runLiveChecks({ silent: true }));
+  window.addEventListener("offline", () => renderLiveChecks({ checks: [{ label: "Browser network", ok: false, severity: "error", detail: "Offline." }] }, true));
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) runLiveChecks({ silent: true });
+  });
+  setInterval(() => runLiveChecks({ silent: true }), 30000);
+  setInterval(() => { if (token) refreshMe().catch(() => {}); }, 120000);
+}
+
+function checkUploadReadiness() {
+  const file = safeEl("upload-file")?.files?.[0];
+  const title = safeEl("upload-title")?.value?.trim();
+  let message = "";
+  if (file) {
+    const allowed = /^(image|video)\//.test(file.type || "") || /\.(jpe?g|png|webp|gif|mp4|webm|mov|m4v|ogg)$/i.test(file.name || "");
+    if (!allowed) message = "This file type may be rejected. Use an image, GIF, or video.";
+    else if (file.size > MAX_UPLOAD_BYTES) message = "This file is over 250MB and will be rejected.";
+    else if (!title) message = "Add a title before uploading.";
+  }
+  setNotice("upload-error", message);
+  setDisabledIfPresent("upload-submit", Boolean(message));
+}
+
 function bindEvents() {
   ensureUploadControlFields();
+  ensureLiveControlButtons();
+  document.addEventListener("error", (event) => {
+    const target = event.target;
+    if (target?.tagName === "IMG") {
+      target.alt = "Preview unavailable";
+      target.closest(".media-preview")?.classList.add("preview-missing");
+    }
+  }, true);
   $("auth-open").addEventListener("click", () => $("auth-dialog").showModal());
   $("logout").addEventListener("click", async () => {
     token = "";
@@ -993,7 +881,9 @@ function bindEvents() {
   $("upload-file").addEventListener("change", () => {
     const file = $("upload-file").files[0];
     $("file-label").textContent = file ? `${file.name} - ${formatBytes(file.size)}` : "Choose image, GIF, or video under 250MB";
+    checkUploadReadiness();
   });
+  if ($("upload-title")) $("upload-title").addEventListener("input", checkUploadReadiness);
   $("refresh").addEventListener("click", refreshAll);
   ["search", "kind-filter", "category-filter", "sort-filter"].forEach((id) => $(id).addEventListener("input", loadMedia));
   $("gallery-grid").addEventListener("click", async (event) => {
@@ -1058,12 +948,14 @@ function bindEvents() {
 async function boot() {
   bindEvents();
   renderAuth();
+  startSilentChecks();
   await initApiOrigin();
   if (REMOTE_MODE && !apiOrigin) return;
   try {
     if (token) await refreshMe();
     await refreshAll();
     $("connection-status").textContent = REMOTE_MODE ? "Live" : "Local";
+    runLiveChecks({ silent: true });
   } catch (err) {
     $("connection-status").textContent = "Offline";
     $("result-count").textContent = err.message;

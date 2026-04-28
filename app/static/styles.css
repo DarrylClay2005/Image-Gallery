@@ -575,3 +575,28 @@ button[data-edit-media] { border-color: rgba(224, 179, 75, 0.45); }
 .upload-controls-grid { display: grid; gap: 10px; grid-template-columns: 1fr; padding: 8px 0; }
 .check-row { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 0.9rem; }
 .check-row input { width: auto; min-height: auto; }
+
+
+.status-pill[data-state="ok"] { border-color: rgba(55, 201, 167, 0.55); color: var(--accent); }
+.status-pill[data-state="warn"] { border-color: rgba(224, 179, 75, 0.7); color: var(--accent-2); }
+.status-pill[data-state="error"] { border-color: rgba(255, 107, 107, 0.75); color: var(--danger); }
+.preview-missing::after {
+  content: "Preview unavailable";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  background: rgba(11, 15, 20, 0.82);
+  font-weight: 800;
+}
+.upload-controls-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255,255,255,0.03);
+}
+.comment-delete, .studio-item [data-restore-media], .studio-item [data-edit-media], .studio-item [data-delete-media] { min-height: 32px; font-size: 0.8rem; }
