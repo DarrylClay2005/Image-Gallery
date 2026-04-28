@@ -341,15 +341,26 @@ async function openDetail(id) {
 }
 
 function renderComments(comments) {
-  $("comments-list").innerHTML = comments.map((comment) => `
-    <div class="comment">
-      <div class="comment-head">
-        <div class="avatar tiny">${comment.user_avatar_path ? `<img src="${apiOrigin}/uploads/${comment.user_avatar_path}" alt="">` : escapeHtml((comment.display_name || comment.username || "IG").slice(0, 2).toUpperCase())}</div>
-        <strong>${escapeHtml(comment.display_name || comment.username)}</strong>
+  $("comments-list").innerHTML = comments.map((comment) => {
+    const canDelete = currentUser && (Number(comment.user_id) === Number(currentUser.id) || Number(activeDetail?.user_id) === Number(currentUser.id));
+    const avatarUrl = comment.user_avatar_url || (comment.user_avatar_path ? `${apiOrigin}/api/users/${comment.user_id}/avatar` : "");
+    return `
+      <div class="comment">
+        <div class="comment-head">
+          <div class="avatar tiny">${avatarUrl ? `<img src="${avatarUrl}" alt="">` : escapeHtml((comment.display_name || comment.username || "IG").slice(0, 2).toUpperCase())}</div>
+          <strong>${escapeHtml(comment.display_name || comment.username)}</strong>
+          ${canDelete ? `<button type="button" class="comment-delete" data-delete-comment="${comment.id}">Delete</button>` : ""}
+        </div>
+        <p>${escapeHtml(comment.body)}</p>
       </div>
-      <p>${escapeHtml(comment.body)}</p>
-    </div>
-  `).join("");
+    `;
+  }).join("");
+}
+
+async function deleteComment(id) {
+  if (!confirm("Delete this comment?")) return;
+  await apiFetch(`/api/comments/${id}`, { method: "DELETE" });
+  if (activeDetail) await openDetail(activeDetail.id);
 }
 
 async function toggleBookmark(id, bookmarked = null) {
@@ -519,10 +530,50 @@ async function openStudio() {
         <h3>${adultBadge(item)}${escapeHtml(item.title)}</h3>
         <p class="muted">${item.views || 0} views · ${item.downloads || 0} downloads · ${item.like_count || 0} likes</p>
       </div>
-      <button type="button" data-delete-media="${item.id}">Delete</button>
+      <button type="button" data-edit-media="${item.id}">Edit</button>\n      <button type="button" data-delete-media="${item.id}">Delete</button>
     </article>
   `).join("") : `<p class="muted">You have not uploaded anything yet.</p>`;
   $("studio-dialog").showModal();
+}
+
+async function editOwnMedia(id) {
+  const item = (await apiFetch(`/api/media/${id}`)).media;
+  const title = prompt("Edit title:", item.title || "");
+  if (title === null) return;
+  const description = prompt("Edit description:", item.description || "");
+  if (description === null) return;
+  const tags = prompt("Edit tags, comma separated:", (item.tags || []).join(", "));
+  if (tags === null) return;
+  const adult = confirm("Mark this post as 18+?");
+  const categoryId = Number(item.category_id || categories[0]?.id || 0);
+  const data = await apiFetch(`/api/media/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title,
+      description,
+      category_id: categoryId,
+      tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean),
+      is_adult: adult,
+    }),
+  });
+  mediaItems = mediaItems.map((entry) => Number(entry.id) === Number(id) ? data.media : entry);
+  await openStudio();
+  await refreshAll();
+}
+
+async function loadFollowingFeed() {
+  if (!currentUser) return $("auth-dialog").showModal();
+  const data = await apiFetch("/api/feed/following");
+  mediaItems = data.media || [];
+  renderMediaGrid();
+}
+
+async function loadLikedFeed() {
+  if (!currentUser) return $("auth-dialog").showModal();
+  const data = await apiFetch("/api/me/likes");
+  mediaItems = data.media || [];
+  renderMediaGrid();
 }
 
 async function deleteOwnMedia(id) {
@@ -924,9 +975,15 @@ function bindEvents() {
   });
   $("studio-list").addEventListener("click", async (event) => {
     const open = event.target.closest("[data-open]");
+    const edit = event.target.closest("[data-edit-media]");
     const del = event.target.closest("[data-delete-media]");
     if (open && !handleAdultOpen(open.dataset.open)) await openDetail(open.dataset.open);
+    if (edit) await editOwnMedia(edit.dataset.editMedia);
     if (del) await deleteOwnMedia(del.dataset.deleteMedia);
+  });
+  $("comments-list").addEventListener("click", async (event) => {
+    const del = event.target.closest("[data-delete-comment]");
+    if (del) await deleteComment(del.dataset.deleteComment);
   });
   $("detail-close").addEventListener("click", () => $("detail-dialog").close());
   $("detail-like").addEventListener("click", () => activeDetail && toggleLike(activeDetail.id));

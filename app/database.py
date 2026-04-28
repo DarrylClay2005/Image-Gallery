@@ -37,6 +37,7 @@ USER_COLUMNS = (
     ("location_label", "VARCHAR(80) NULL"),
     ("profile_color", "VARCHAR(20) NOT NULL DEFAULT '#37c9a7'"),
     ("avatar_path", "VARCHAR(500) NULL"),
+    ("avatar_file_id", "BIGINT UNSIGNED NULL"),
     ("avatar_mime_type", "VARCHAR(120) NULL"),
     ("avatar_original_filename", "VARCHAR(255) NULL"),
     ("public_profile", "TINYINT(1) NOT NULL DEFAULT 1"),
@@ -48,6 +49,8 @@ USER_COLUMNS = (
     ("updated_at", "TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"),
 )
 MEDIA_COLUMNS = (
+    ("media_file_id", "BIGINT UNSIGNED NULL"),
+    ("content_sha256", "CHAR(64) NULL"),
     ("is_adult", "TINYINT(1) NOT NULL DEFAULT 0"),
     ("adult_marked_by_user", "TINYINT(1) NOT NULL DEFAULT 0"),
     ("adult_marked_by_ai", "TINYINT(1) NOT NULL DEFAULT 0"),
@@ -177,6 +180,69 @@ class GalleryDatabase:
                       KEY idx_media_category (category_id),
                       CONSTRAINT fk_media_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
                       CONSTRAINT fk_media_category FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE RESTRICT
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS media_files (
+                      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                      sha256 CHAR(64) NOT NULL UNIQUE,
+                      mime_type VARCHAR(120) NOT NULL,
+                      original_filename VARCHAR(255) NOT NULL,
+                      media_kind ENUM('image','video') NOT NULL,
+                      file_size BIGINT UNSIGNED NOT NULL,
+                      content LONGBLOB NOT NULL,
+                      created_by BIGINT UNSIGNED NULL,
+                      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      KEY idx_media_files_kind (media_kind),
+                      KEY idx_media_files_user (created_by),
+                      CONSTRAINT fk_media_files_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS user_avatar_files (
+                      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                      user_id BIGINT UNSIGNED NOT NULL,
+                      sha256 CHAR(64) NOT NULL,
+                      mime_type VARCHAR(120) NOT NULL,
+                      original_filename VARCHAR(255) NOT NULL,
+                      file_size BIGINT UNSIGNED NOT NULL,
+                      content LONGBLOB NOT NULL,
+                      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      KEY idx_avatar_user (user_id, created_at),
+                      UNIQUE KEY uniq_avatar_user_hash (user_id, sha256),
+                      CONSTRAINT fk_avatar_files_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS user_follows (
+                      follower_id BIGINT UNSIGNED NOT NULL,
+                      followed_id BIGINT UNSIGNED NOT NULL,
+                      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      PRIMARY KEY (follower_id, followed_id),
+                      KEY idx_followed (followed_id, created_at),
+                      CONSTRAINT fk_follows_follower FOREIGN KEY (follower_id) REFERENCES users(id) ON DELETE CASCADE,
+                      CONSTRAINT fk_follows_followed FOREIGN KEY (followed_id) REFERENCES users(id) ON DELETE CASCADE,
+                      CONSTRAINT chk_no_self_follow CHECK (follower_id <> followed_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS auth_attempts (
+                      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                      username VARCHAR(80) NULL,
+                      ip_address VARCHAR(64) NOT NULL,
+                      successful TINYINT(1) NOT NULL DEFAULT 0,
+                      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      KEY idx_auth_attempts_ip_time (ip_address, created_at),
+                      KEY idx_auth_attempts_user_time (username, created_at)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """
                 )
@@ -430,7 +496,7 @@ class GalleryDatabase:
                 await cur.execute(
                     """
                     SELECT id, username, display_name, bio, website_url, location_label, profile_color,
-                           email, email_verified_at, avatar_path, avatar_mime_type, avatar_original_filename, public_profile,
+                           email, email_verified_at, avatar_path, avatar_file_id, avatar_mime_type, avatar_original_filename, public_profile,
                            show_liked_count, birthdate, age_verified_at, adult_content_consent,
                            user_settings, created_at, updated_at
                     FROM users WHERE id=%s
@@ -517,6 +583,28 @@ class GalleryDatabase:
                 await cur.execute("UPDATE users SET user_settings=%s WHERE id=%s", (json.dumps(settings), user_id))
         return await self.get_user(user_id)
 
+    async def save_avatar_file(self, user_id: int, *, content: bytes, sha256: str, mime_type: str, original_filename: str) -> dict[str, Any]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO user_avatar_files (user_id, sha256, mime_type, original_filename, file_size, content)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id), created_at=CURRENT_TIMESTAMP
+                    """,
+                    (user_id, sha256, mime_type[:120], original_filename[:255], len(content), content),
+                )
+                file_id = cur.lastrowid
+                await cur.execute(
+                    """
+                    UPDATE users
+                    SET avatar_file_id=%s, avatar_path=%s, avatar_mime_type=%s, avatar_original_filename=%s
+                    WHERE id=%s
+                    """,
+                    (file_id, f"avatar-db://{file_id}", mime_type[:120], original_filename[:255], user_id),
+                )
+        return await self.get_user(user_id)
+
     async def update_user_avatar(self, user_id: int, storage_path: str, mime_type: str, original_filename: str) -> dict[str, Any]:
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
@@ -565,6 +653,58 @@ class GalleryDatabase:
                 )
                 return list(await cur.fetchall())
 
+    async def save_media_file(self, *, user_id: int, content: bytes, sha256: str, mime_type: str, original_filename: str, media_kind: str) -> dict[str, Any]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    "SELECT id, sha256, mime_type, original_filename, media_kind, file_size, created_by, created_at FROM media_files WHERE sha256=%s",
+                    (sha256,),
+                )
+                existing = await cur.fetchone()
+                if existing:
+                    return dict(existing, duplicate=True)
+                await cur.execute(
+                    """
+                    INSERT INTO media_files (sha256, mime_type, original_filename, media_kind, file_size, content, created_by)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (sha256, mime_type[:120], original_filename[:255], media_kind, len(content), content, user_id),
+                )
+                await cur.execute(
+                    "SELECT id, sha256, mime_type, original_filename, media_kind, file_size, created_by, created_at FROM media_files WHERE id=%s",
+                    (cur.lastrowid,),
+                )
+                row = await cur.fetchone()
+                return dict(row, duplicate=False)
+
+    async def get_media_file(self, media_id: int) -> dict[str, Any] | None:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT f.id, f.sha256, f.mime_type, f.original_filename, f.media_kind, f.file_size, f.content
+                    FROM media_files f
+                    JOIN media_items m ON m.media_file_id=f.id
+                    WHERE m.id=%s
+                    """,
+                    (media_id,),
+                )
+                return await cur.fetchone()
+
+    async def get_avatar_file(self, user_id: int) -> dict[str, Any] | None:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT f.id, f.sha256, f.mime_type, f.original_filename, f.file_size, f.content
+                    FROM user_avatar_files f
+                    JOIN users u ON u.avatar_file_id=f.id
+                    WHERE u.id=%s
+                    """,
+                    (user_id,),
+                )
+                return await cur.fetchone()
+
     async def add_media(self, item: dict[str, Any]) -> dict[str, Any]:
         tags_json = json.dumps(item.get("tags") or [])
         async with self.pool.acquire() as conn:
@@ -573,21 +713,15 @@ class GalleryDatabase:
                     """
                     INSERT INTO media_items
                       (user_id, category_id, title, description, tags, media_kind, mime_type, original_filename,
-                       storage_path, file_size, is_adult, adult_marked_by_user, adult_marked_by_ai,
+                       storage_path, file_size, media_file_id, content_sha256, is_adult, adult_marked_by_user, adult_marked_by_ai,
                        moderation_status, moderation_score, moderation_reason, moderated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                     """,
                     (
-                        item["user_id"],
-                        item["category_id"],
-                        item["title"],
-                        item.get("description"),
-                        tags_json,
-                        item["media_kind"],
-                        item["mime_type"],
-                        item["original_filename"],
-                        item["storage_path"],
-                        item["file_size"],
+                        item["user_id"], item["category_id"], item["title"], item.get("description"), tags_json,
+                        item["media_kind"], item["mime_type"], item["original_filename"],
+                        item.get("storage_path") or f"db://media/{item.get('media_file_id')}", item["file_size"],
+                        item.get("media_file_id"), item.get("content_sha256"),
                         1 if item.get("is_adult") else 0,
                         1 if item.get("adult_marked_by_user") else 0,
                         1 if item.get("adult_marked_by_ai") else 0,
@@ -806,6 +940,155 @@ class GalleryDatabase:
                 )
                 return list(await cur.fetchall())
 
+
+    async def update_media(self, media_id: int, user_id: int, payload: dict[str, Any]) -> dict[str, Any] | None:
+        title = self._clean_text(payload.get("title"), 160, required=True)
+        description = self._clean_text(payload.get("description"), 2000)
+        tags = payload.get("tags") or []
+        if not isinstance(tags, list):
+            tags = []
+        clean_tags = []
+        for raw in tags:
+            tag = re.sub(r"[^A-Za-z0-9_.-]+", "", str(raw).strip())[:32]
+            if tag and tag.lower() not in {existing.lower() for existing in clean_tags}:
+                clean_tags.append(tag)
+        clean_tags = clean_tags[:12]
+        category_id = int(payload.get("category_id") or 0)
+        if category_id <= 0:
+            raise ValueError("Choose a valid category.")
+        is_adult = 1 if payload.get("is_adult") else 0
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT id FROM categories WHERE id=%s", (category_id,))
+                if not await cur.fetchone():
+                    raise ValueError("Category does not exist.")
+                await cur.execute("SELECT user_id FROM media_items WHERE id=%s", (media_id,))
+                row = await cur.fetchone()
+                if not row:
+                    return None
+                if int(row["user_id"]) != int(user_id):
+                    raise PermissionError("Only the uploader can edit this post.")
+                await cur.execute(
+                    """
+                    UPDATE media_items
+                    SET title=%s, description=%s, tags=%s, category_id=%s,
+                        is_adult=%s, adult_marked_by_user=%s,
+                        moderation_status=CASE WHEN %s=1 THEN 'adult' ELSE moderation_status END,
+                        moderation_reason=CASE WHEN %s=1 THEN 'Uploader marked this post as 18+.' ELSE moderation_reason END,
+                        moderated_at=CASE WHEN %s=1 THEN CURRENT_TIMESTAMP ELSE moderated_at END
+                    WHERE id=%s AND user_id=%s
+                    """,
+                    (title, description, json.dumps(clean_tags), category_id, is_adult, is_adult, is_adult, is_adult, is_adult, media_id, user_id),
+                )
+        return await self.get_media(media_id, user_id)
+
+    async def delete_comment(self, comment_id: int, user_id: int) -> bool:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT cm.id, cm.user_id AS comment_user_id, m.user_id AS media_user_id
+                    FROM media_comments cm
+                    JOIN media_items m ON m.id=cm.media_id
+                    WHERE cm.id=%s
+                    """,
+                    (comment_id,),
+                )
+                row = await cur.fetchone()
+                if not row:
+                    return False
+                if int(row["comment_user_id"]) != int(user_id) and int(row["media_user_id"]) != int(user_id):
+                    raise PermissionError("Only the commenter or post owner can delete this comment.")
+                await cur.execute("DELETE FROM media_comments WHERE id=%s", (comment_id,))
+                return True
+
+    async def following_feed(self, user_id: int, limit: int = 60, offset: int = 0) -> list[dict[str, Any]]:
+        viewer = int(user_id)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT m.*, c.name AS category_name, c.slug AS category_slug,
+                           u.username, u.display_name, u.bio AS user_bio, u.website_url AS user_website_url,
+                           u.avatar_path AS user_avatar_path, u.profile_color, u.public_profile,
+                           COUNT(DISTINCT l.user_id) AS like_count,
+                           COUNT(DISTINCT cm.id) AS comment_count,
+                           MAX(CASE WHEN b.user_id IS NULL THEN 0 ELSE 1 END) AS bookmarked_by_me,
+                           MAX(CASE WHEN l2.user_id IS NULL THEN 0 ELSE 1 END) AS liked_by_me
+                    FROM user_follows f
+                    JOIN media_items m ON m.user_id=f.followed_id
+                    JOIN categories c ON c.id=m.category_id
+                    JOIN users u ON u.id=m.user_id
+                    LEFT JOIN media_likes l ON l.media_id=m.id
+                    LEFT JOIN media_likes l2 ON l2.media_id=m.id AND l2.user_id=%s
+                    LEFT JOIN media_bookmarks b ON b.media_id=m.id AND b.user_id=%s
+                    LEFT JOIN media_comments cm ON cm.media_id=m.id
+                    WHERE f.follower_id=%s
+                    GROUP BY m.id
+                    ORDER BY m.created_at DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    (viewer, viewer, viewer, max(1, min(limit, 100)), max(0, offset)),
+                )
+                return [self._decode_media(row) for row in await cur.fetchall()]
+
+    async def list_liked_media(self, user_id: int, limit: int = 80, offset: int = 0) -> list[dict[str, Any]]:
+        viewer = int(user_id)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT m.*, c.name AS category_name, c.slug AS category_slug,
+                           u.username, u.display_name, u.bio AS user_bio, u.website_url AS user_website_url,
+                           u.avatar_path AS user_avatar_path, u.profile_color, u.public_profile,
+                           COUNT(DISTINCT l_all.user_id) AS like_count,
+                           COUNT(DISTINCT cm.id) AS comment_count,
+                           MAX(CASE WHEN b.user_id IS NULL THEN 0 ELSE 1 END) AS bookmarked_by_me,
+                           1 AS liked_by_me
+                    FROM media_likes liked
+                    JOIN media_items m ON m.id=liked.media_id
+                    JOIN categories c ON c.id=m.category_id
+                    JOIN users u ON u.id=m.user_id
+                    LEFT JOIN media_likes l_all ON l_all.media_id=m.id
+                    LEFT JOIN media_bookmarks b ON b.media_id=m.id AND b.user_id=%s
+                    LEFT JOIN media_comments cm ON cm.media_id=m.id
+                    WHERE liked.user_id=%s
+                    GROUP BY m.id
+                    ORDER BY liked.created_at DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    (viewer, viewer, max(1, min(limit, 100)), max(0, offset)),
+                )
+                return [self._decode_media(row) for row in await cur.fetchall()]
+
+    async def list_user_follows(self, user_id: int, mode: str = "followers", viewer_id: int | None = None) -> list[dict[str, Any]]:
+        viewer = int(viewer_id or 0)
+        if mode == "following":
+            join_col, user_col = "followed_id", "follower_id"
+        else:
+            join_col, user_col = "follower_id", "followed_id"
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    f"""
+                    SELECT u.id, u.username,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.display_name ELSE u.username END AS display_name,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.bio ELSE NULL END AS bio,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.avatar_path ELSE NULL END AS avatar_path,
+                           u.profile_color, u.public_profile, f.created_at AS followed_at,
+                           MAX(CASE WHEN mine.follower_id IS NULL THEN 0 ELSE 1 END) AS followed_by_me
+                    FROM user_follows f
+                    JOIN users u ON u.id=f.{join_col}
+                    LEFT JOIN user_follows mine ON mine.follower_id=%s AND mine.followed_id=u.id
+                    WHERE f.{user_col}=%s
+                    GROUP BY u.id, f.created_at
+                    ORDER BY f.created_at DESC
+                    LIMIT 200
+                    """,
+                    (viewer, viewer, viewer, viewer, user_id),
+                )
+                return [self._decode_user(row) for row in await cur.fetchall()]
+
     async def stats(self) -> dict[str, Any]:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
@@ -984,6 +1267,104 @@ class GalleryDatabase:
                     (viewer_id or 0, viewer_id or 0, viewer_id or 0, viewer_id or 0, viewer_id or 0, viewer_id or 0, collection_id),
                 )
                 return [self._decode_media(row) for row in await cur.fetchall()]
+
+    async def get_public_profile(self, username: str, viewer_id: int | None = None) -> dict[str, Any] | None:
+        username = normalize_username(username)
+        viewer = viewer_id or 0
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT u.id, u.username,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.display_name ELSE u.username END AS display_name,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.bio ELSE NULL END AS bio,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.website_url ELSE NULL END AS website_url,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.location_label ELSE NULL END AS location_label,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.avatar_path ELSE NULL END AS avatar_path,
+                           u.avatar_file_id, u.profile_color, u.public_profile, u.created_at,
+                           COUNT(DISTINCT m.id) AS media_count,
+                           COUNT(DISTINCT f1.follower_id) AS follower_count,
+                           COUNT(DISTINCT f2.followed_id) AS following_count,
+                           MAX(CASE WHEN f3.follower_id=%s THEN 1 ELSE 0 END) AS followed_by_me
+                    FROM users u
+                    LEFT JOIN media_items m ON m.user_id=u.id
+                    LEFT JOIN user_follows f1 ON f1.followed_id=u.id
+                    LEFT JOIN user_follows f2 ON f2.follower_id=u.id
+                    LEFT JOIN user_follows f3 ON f3.followed_id=u.id AND f3.follower_id=%s
+                    WHERE u.username=%s
+                    GROUP BY u.id
+                    """,
+                    (viewer, viewer, viewer, viewer, viewer, viewer, viewer, username),
+                )
+                row = await cur.fetchone()
+                if not row:
+                    return None
+                row["public_profile"] = bool(row.get("public_profile"))
+                row["followed_by_me"] = bool(row.get("followed_by_me"))
+                for k in ("media_count", "follower_count", "following_count"):
+                    if isinstance(row.get(k), Decimal):
+                        row[k] = int(row[k])
+                return row
+
+    async def set_follow(self, follower_id: int, followed_id: int, following: bool) -> dict[str, Any] | None:
+        if follower_id == followed_id:
+            raise ValueError("You cannot follow yourself.")
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT id FROM users WHERE id=%s", (followed_id,))
+                if not await cur.fetchone():
+                    return None
+                if following:
+                    await cur.execute("INSERT IGNORE INTO user_follows (follower_id, followed_id) VALUES (%s, %s)", (follower_id, followed_id))
+                else:
+                    await cur.execute("DELETE FROM user_follows WHERE follower_id=%s AND followed_id=%s", (follower_id, followed_id))
+                await cur.execute("SELECT COUNT(*) AS n FROM user_follows WHERE followed_id=%s", (followed_id,))
+                followers = int((await cur.fetchone())["n"] or 0)
+                return {"followed_id": followed_id, "following": bool(following), "follower_count": followers}
+
+    async def change_password(self, user_id: int, old_password: str, new_password: str) -> bool:
+        if len(new_password or "") < 8:
+            raise ValueError("New password must be at least 8 characters.")
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT password_hash FROM users WHERE id=%s", (user_id,))
+                row = await cur.fetchone()
+                if not row or not verify_password(old_password, row["password_hash"]):
+                    return False
+                await cur.execute("UPDATE users SET password_hash=%s WHERE id=%s", (hash_password(new_password), user_id))
+                return True
+
+    async def delete_account(self, user_id: int, password: str) -> bool:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT password_hash FROM users WHERE id=%s", (user_id,))
+                row = await cur.fetchone()
+                if not row or not verify_password(password, row["password_hash"]):
+                    return False
+                await cur.execute("DELETE FROM users WHERE id=%s", (user_id,))
+                return True
+
+    async def record_auth_attempt(self, username: str | None, ip_address: str, successful: bool) -> None:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO auth_attempts (username, ip_address, successful) VALUES (%s, %s, %s)",
+                    ((username or "")[:80] or None, ip_address[:64], 1 if successful else 0),
+                )
+
+    async def count_recent_failed_auth(self, username: str | None, ip_address: str, minutes: int = 15) -> int:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT COUNT(*) AS n FROM auth_attempts
+                    WHERE successful=0 AND created_at >= (CURRENT_TIMESTAMP - INTERVAL %s MINUTE)
+                      AND (ip_address=%s OR username=%s)
+                    """,
+                    (minutes, ip_address[:64], (username or "")[:80]),
+                )
+                row = await cur.fetchone()
+                return int(row["n"] or 0)
 
     async def report_media(self, media_id: int, user_id: int, reason: str, details: str | None) -> dict[str, Any]:
         reason = self._clean_text(reason, 80, required=True)

@@ -3,8 +3,8 @@ import html
 import os
 import re
 import secrets
-import shutil
-import uuid
+import hashlib
+import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 from decimal import Decimal
@@ -13,7 +13,7 @@ from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -50,6 +50,19 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class PasswordChangeRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+
+class AccountDeleteRequest(BaseModel):
+    password: str
+
+
+class FollowRequest(BaseModel):
+    following: bool = True
+
+
 class EmailUpdateRequest(BaseModel):
     email: str | None = None
 
@@ -69,6 +82,15 @@ class LikeRequest(BaseModel):
 
 class CommentRequest(BaseModel):
     body: str
+
+
+class MediaUpdateRequest(BaseModel):
+    title: str
+    description: str | None = None
+    category_id: int
+    tags: list[str] = []
+    is_adult: bool = False
+
 
 
 class ProfileUpdateRequest(BaseModel):
@@ -163,7 +185,9 @@ def _age_from_birthdate(birthdate: date) -> int:
     return years
 
 
-def _public_url(request: Request, storage_path: str) -> str:
+def _public_url(request: Request, storage_path: str, media_id: int | None = None) -> str:
+    if media_id is not None:
+        return str(request.url_for("serve_media_file", media_id=media_id))
     return str(request.url_for("uploads", path=storage_path))
 
 
@@ -212,10 +236,10 @@ def _with_urls(request: Request, item: dict[str, Any] | None, adult_allowed: boo
         clone["url"] = None
         clone["download_url"] = None
     else:
-        clone["url"] = _public_url(request, clone["storage_path"])
+        clone["url"] = _public_url(request, clone.get("storage_path", ""), int(clone["id"]))
         clone["download_url"] = str(request.url_for("download_media", media_id=clone["id"]))
     if clone.get("user_avatar_path"):
-        clone["user_avatar_url"] = _public_url(request, clone["user_avatar_path"])
+        clone["user_avatar_url"] = str(request.url_for("serve_user_avatar", user_id=clone.get("user_id") or clone.get("id")))
     return _jsonable(clone)
 
 
@@ -224,7 +248,7 @@ def _with_user_urls(request: Request, user: dict[str, Any] | None) -> dict[str, 
         return None
     clone = dict(user)
     if clone.get("avatar_path"):
-        clone["avatar_url"] = _public_url(request, clone["avatar_path"])
+        clone["avatar_url"] = str(request.url_for("serve_user_avatar", user_id=clone["id"]))
     return _jsonable(clone)
 
 
@@ -233,13 +257,13 @@ def _with_collection_urls(request: Request, collection: dict[str, Any] | None, a
         return None
     clone = dict(collection)
     if clone.get("cover_path") and (adult_allowed or not clone.get("cover_is_adult")):
-        clone["cover_url"] = _public_url(request, clone["cover_path"])
+        clone["cover_url"] = _public_url(request, clone["cover_path"], int(clone["cover_media_id"]) if clone.get("cover_media_id") else None)
     elif clone.get("cover_is_adult"):
         clone.pop("cover_path", None)
         clone["cover_url"] = None
         clone["cover_locked"] = True
     if clone.get("user_avatar_path"):
-        clone["user_avatar_url"] = _public_url(request, clone["user_avatar_path"])
+        clone["user_avatar_url"] = str(request.url_for("serve_user_avatar", user_id=clone.get("user_id") or clone.get("id")))
     return _jsonable(clone)
 
 
@@ -281,6 +305,43 @@ def _moderate_upload(
     }
 
 
+MAGIC_SIGNATURES = (
+    (b"\xff\xd8\xff", "image/jpeg", "image"),
+    (b"\x89PNG\r\n\x1a\n", "image/png", "image"),
+    (b"GIF87a", "image/gif", "image"),
+    (b"GIF89a", "image/gif", "image"),
+    (b"\x1aE\xdf\xa3", "video/webm", "video"),
+    (b"OggS", "video/ogg", "video"),
+)
+RATE_BUCKETS: dict[str, list[float]] = {}
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    return forwarded or (request.client.host if request.client else "unknown")
+
+
+def _rate_limit(key: str, *, limit: int, window_seconds: int) -> None:
+    now = time.time()
+    bucket = [t for t in RATE_BUCKETS.get(key, []) if now - t < window_seconds]
+    if len(bucket) >= limit:
+        raise HTTPException(status_code=429, detail="Too many attempts. Try again later.")
+    bucket.append(now)
+    RATE_BUCKETS[key] = bucket
+
+
+def _sniff_magic(data: bytes) -> tuple[str, str]:
+    head = data[:32]
+    if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
+        return "image/webp", "image"
+    if len(head) >= 12 and head[4:8] == b"ftyp":
+        return "video/mp4", "video"
+    for prefix, mime, kind in MAGIC_SIGNATURES:
+        if head.startswith(prefix):
+            return mime, kind
+    raise HTTPException(status_code=400, detail="Unsupported or invalid file bytes.")
+
+
 def _detect_media_kind(upload: UploadFile) -> str:
     mime = (upload.content_type or mimetypes.guess_type(upload.filename or "")[0] or "").lower()
     if mime.startswith(IMAGE_MIME_PREFIXES):
@@ -299,38 +360,31 @@ def _safe_extension(filename: str, mime_type: str) -> str:
     return ".jpg" if ext == ".jpe" else ext
 
 
-async def _save_upload(upload: UploadFile, media_kind: str, max_bytes: int) -> tuple[str, int]:
-    mime_type = upload.content_type or mimetypes.guess_type(upload.filename or "")[0] or "application/octet-stream"
-    ext = _safe_extension(upload.filename or "", mime_type)
-    rel_dir = Path(media_kind) / uuid.uuid4().hex[:2]
-    abs_dir = settings.uploads_dir / rel_dir
-    abs_dir.mkdir(parents=True, exist_ok=True)
-    rel_path = rel_dir / f"{uuid.uuid4().hex}{ext}"
-    abs_path = settings.uploads_dir / rel_path
-    written = 0
-    try:
-        with abs_path.open("wb") as out:
-            while True:
-                chunk = await upload.read(1024 * 1024)
-                if not chunk:
-                    break
-                written += len(chunk)
-                if written > max_bytes:
-                    raise HTTPException(status_code=413, detail="Uploads must be 250MB or smaller.")
-                out.write(chunk)
-    except Exception:
-        abs_path.unlink(missing_ok=True)
-        raise
-    return rel_path.as_posix(), written
-
-
-async def _save_avatar(upload: UploadFile) -> tuple[str, int]:
-    if _detect_media_kind(upload) != "image":
+async def _read_validated_upload(upload: UploadFile, max_bytes: int, *, image_only: bool = False) -> dict[str, Any]:
+    content = await upload.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Upload is empty.")
+    if len(content) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"Uploads must be {max_bytes // (1024 * 1024)}MB or smaller.")
+    sniffed_mime, media_kind = _sniff_magic(content)
+    if image_only and media_kind != "image":
         raise HTTPException(status_code=400, detail="Profile pictures must be images.")
-    return await _save_upload(upload, "avatars", 5 * 1024 * 1024)
+    claimed = (upload.content_type or "").lower()
+    if claimed and not claimed.startswith(("image/", "video/", "application/octet-stream")):
+        raise HTTPException(status_code=400, detail="Invalid declared content type.")
+    original_filename = Path(upload.filename or "upload").name[:255]
+    _safe_extension(original_filename, sniffed_mime)
+    sha256 = hashlib.sha256(content).hexdigest()
+    return {
+        "content": content,
+        "sha256": sha256,
+        "mime_type": sniffed_mime,
+        "media_kind": media_kind,
+        "original_filename": original_filename,
+        "file_size": len(content),
+    }
 
 
-@asynccontextmanager
 async def lifespan(app: FastAPI):
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     await db.connect()
@@ -356,7 +410,6 @@ app.add_middleware(
 )
 app.mount("/static", StaticFiles(directory=ROOT_DIR / "app" / "static"), name="static")
 app.mount("/app/static", StaticFiles(directory=ROOT_DIR / "app" / "static"), name="app_static")
-app.mount("/uploads", StaticFiles(directory=settings.uploads_dir), name="uploads")
 
 
 @app.get("/")
@@ -442,11 +495,17 @@ async def verify_email_code(payload: EmailCodeRequest, request: Request) -> dict
 
 
 @app.post("/api/auth/login")
-async def login(payload: LoginRequest) -> dict[str, Any]:
+async def login(payload: LoginRequest, request: Request) -> dict[str, Any]:
+    ip = _client_ip(request)
+    username = (payload.username or "").strip()[:80]
+    if await db.count_recent_failed_auth(username, ip) >= 8:
+        raise HTTPException(status_code=429, detail="Too many failed login attempts. Try again later.")
     try:
         user = await db.authenticate_user(payload.username, payload.password)
     except ValueError as exc:
+        await db.record_auth_attempt(username, ip, False)
         raise HTTPException(status_code=400, detail=str(exc)) from None
+    await db.record_auth_attempt(username, ip, bool(user))
     if not user:
         raise HTTPException(status_code=401, detail="Invalid username or password.")
     return {"user": _jsonable(user), "token": issue_token(settings.session_secret, user)}
@@ -487,13 +546,9 @@ async def update_settings(payload: SettingsUpdateRequest, request: Request) -> d
 @app.post("/api/me/avatar")
 async def update_avatar(request: Request, file: UploadFile = File(...)) -> dict[str, Any]:
     auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
-    storage_path, _file_size = await _save_avatar(file)
-    user = await db.update_user_avatar(
-        int(auth["id"]),
-        storage_path,
-        file.content_type or "application/octet-stream",
-        Path(file.filename or "avatar").name,
-    )
+    _rate_limit(f"avatar:{auth['id']}", limit=20, window_seconds=3600)
+    uploaded = await _read_validated_upload(file, 5 * 1024 * 1024, image_only=True)
+    user = await db.save_avatar_file(int(auth["id"]), **uploaded)
     return {"user": _with_user_urls(request, user)}
 
 
@@ -529,6 +584,46 @@ async def my_media(request: Request) -> dict[str, Any]:
     adult_allowed = await _viewer_can_open_adult(request)
     return {"media": [_with_urls(request, item, adult_allowed) for item in items]}
 
+
+
+
+@app.post("/api/me/password")
+async def change_password(payload: PasswordChangeRequest, request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    ok = await db.change_password(int(auth["id"]), payload.old_password, payload.new_password)
+    if not ok:
+        raise HTTPException(status_code=401, detail="Current password is incorrect.")
+    return {"ok": True}
+
+
+@app.delete("/api/me")
+async def delete_account(payload: AccountDeleteRequest, request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    ok = await db.delete_account(int(auth["id"]), payload.password)
+    if not ok:
+        raise HTTPException(status_code=401, detail="Password is incorrect.")
+    return {"deleted": True}
+
+
+@app.get("/api/users/{username}")
+async def public_profile(username: str, request: Request) -> dict[str, Any]:
+    viewer_id = _user_id(_auth_optional(request))
+    profile = await db.get_public_profile(username, viewer_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return {"user": _with_user_urls(request, profile)}
+
+
+@app.post("/api/users/{user_id}/follow")
+async def follow_user(user_id: int, payload: FollowRequest, request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    try:
+        result = await db.set_follow(int(auth["id"]), user_id, payload.following)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    if not result:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return result
 
 @app.get("/api/categories")
 async def categories() -> dict[str, Any]:
@@ -659,7 +754,14 @@ async def upload_media(
         mime_type=file.content_type or "application/octet-stream",
         user_marked_adult=is_adult,
     )
-    storage_path, file_size = await _save_upload(file, media_kind, settings.max_upload_bytes)
+    _rate_limit(f"upload:{auth['id']}", limit=60, window_seconds=3600)
+    uploaded = await _read_validated_upload(file, settings.max_upload_bytes)
+    media_kind = uploaded["media_kind"]
+    media_file = await db.save_media_file(user_id=int(auth["id"]), **uploaded)
+    if media_file.get("duplicate"):
+        raise HTTPException(status_code=409, detail="That exact file is already stored in the gallery database.")
+    if media_file["sha256"] != uploaded["sha256"]:
+        raise HTTPException(status_code=500, detail="Stored file hash verification failed.")
     item = await db.add_media(
         {
             "user_id": int(auth["id"]),
@@ -668,10 +770,12 @@ async def upload_media(
             "description": description.strip()[:2000] or None,
             "tags": parsed_tags,
             "media_kind": media_kind,
-            "mime_type": file.content_type or "application/octet-stream",
-            "original_filename": original_filename,
-            "storage_path": storage_path,
-            "file_size": file_size,
+            "mime_type": uploaded["mime_type"],
+            "original_filename": uploaded["original_filename"],
+            "storage_path": f"db://media/{media_file['id']}",
+            "media_file_id": int(media_file["id"]),
+            "content_sha256": uploaded["sha256"],
+            "file_size": uploaded["file_size"],
             **moderation,
         }
     )
@@ -691,6 +795,21 @@ async def media_detail(media_id: int, request: Request) -> dict[str, Any]:
     await db.increment_counter(media_id, "views")
     comments = await db.list_comments(media_id)
     return {"media": _with_urls(request, item, adult_allowed), "comments": _jsonable(comments)}
+
+
+@app.patch("/api/media/{media_id}")
+async def edit_media(media_id: int, payload: MediaUpdateRequest, request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    try:
+        item = await db.update_media(media_id, int(auth["id"]), payload.model_dump())
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    if not item:
+        raise HTTPException(status_code=404, detail="Media not found.")
+    adult_allowed = await _viewer_can_open_adult(request)
+    return {"media": _with_urls(request, item, adult_allowed)}
 
 
 @app.post("/api/media/{media_id}/like")
@@ -725,6 +844,18 @@ async def add_comment(media_id: int, payload: CommentRequest, request: Request) 
     return {"comment": _jsonable(comment)}
 
 
+@app.delete("/api/comments/{comment_id}")
+async def delete_comment(comment_id: int, request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    try:
+        deleted = await db.delete_comment(comment_id, int(auth["id"]))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from None
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Comment not found.")
+    return {"deleted": True}
+
+
 @app.post("/api/media/{media_id}/report")
 async def report_media(media_id: int, payload: ReportRequest, request: Request) -> dict[str, Any]:
     auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
@@ -743,25 +874,60 @@ async def delete_media(media_id: int, request: Request) -> dict[str, Any]:
     item = await db.delete_media(media_id, int(auth["id"]))
     if not item:
         raise HTTPException(status_code=404, detail="Media not found.")
-    path = (settings.uploads_dir / item["storage_path"]).resolve()
-    if str(path).startswith(str(settings.uploads_dir.resolve())):
-        path.unlink(missing_ok=True)
     return {"deleted": True}
 
 
-@app.get("/api/media/{media_id}/download", name="download_media")
-async def download_media(media_id: int, request: Request) -> FileResponse:
+@app.get("/api/media/{media_id}/file", name="serve_media_file")
+async def serve_media_file(media_id: int, request: Request) -> Response:
     viewer_id = _user_id(_auth_optional(request))
     item = await db.get_media(media_id, viewer_id)
     if not item:
         raise HTTPException(status_code=404, detail="Media not found.")
     if item.get("is_adult") and not await _viewer_can_open_adult(request):
         raise HTTPException(status_code=403, detail="Age verification required for this 18+ post.")
+    file_row = await db.get_media_file(media_id)
+    if not file_row:
+        raise HTTPException(status_code=404, detail="File missing from database.")
+    digest = hashlib.sha256(file_row["content"]).hexdigest()
+    if digest != file_row["sha256"]:
+        raise HTTPException(status_code=500, detail="Stored file failed hash verification.")
+    return Response(content=file_row["content"], media_type=file_row["mime_type"], headers={"Cache-Control": "public, max-age=86400", "X-Content-SHA256": digest})
+
+
+@app.get("/api/users/{user_id}/avatar", name="serve_user_avatar")
+async def serve_user_avatar(user_id: int) -> Response:
+    file_row = await db.get_avatar_file(user_id)
+    if not file_row:
+        raise HTTPException(status_code=404, detail="Avatar not found.")
+    digest = hashlib.sha256(file_row["content"]).hexdigest()
+    if digest != file_row["sha256"]:
+        raise HTTPException(status_code=500, detail="Stored avatar failed hash verification.")
+    return Response(content=file_row["content"], media_type=file_row["mime_type"], headers={"Cache-Control": "public, max-age=86400", "X-Content-SHA256": digest})
+
+
+@app.get("/api/media/{media_id}/download", name="download_media")
+async def download_media(media_id: int, request: Request) -> Response:
+    viewer_id = _user_id(_auth_optional(request))
+    item = await db.get_media(media_id, viewer_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Media not found.")
+    if item.get("is_adult") and not await _viewer_can_open_adult(request):
+        raise HTTPException(status_code=403, detail="Age verification required for this 18+ post.")
+    file_row = await db.get_media_file(media_id)
+    if not file_row:
+        raise HTTPException(status_code=404, detail="File missing from database.")
+    digest = hashlib.sha256(file_row["content"]).hexdigest()
+    if digest != file_row["sha256"]:
+        raise HTTPException(status_code=500, detail="Stored file failed hash verification.")
     await db.increment_counter(media_id, "downloads")
-    path = (settings.uploads_dir / item["storage_path"]).resolve()
-    if not str(path).startswith(str(settings.uploads_dir.resolve())) or not path.exists():
-        raise HTTPException(status_code=404, detail="File missing.")
-    return FileResponse(path, media_type=item["mime_type"], filename=item["original_filename"])
+    return Response(
+        content=file_row["content"],
+        media_type=file_row["mime_type"],
+        headers={
+            "Content-Disposition": f'attachment; filename="{file_row["original_filename"]}"',
+            "X-Content-SHA256": digest,
+        },
+    )
 
 
 @app.get("/api/stats")
