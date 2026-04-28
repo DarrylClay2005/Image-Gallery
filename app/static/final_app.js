@@ -174,7 +174,20 @@ function applyAccountSettings() {
 
 async function refreshMe() {
   if (!token) return;
-  const data = await apiFetch("/api/me");
+  let data;
+  try {
+    data = await apiFetch("/api/me");
+  } catch (err) {
+    if (err.status === 401) {
+      token = "";
+      currentUser = null;
+      writeStore(TOKEN_KEY, "");
+      writeStore(USER_KEY, "");
+      renderAuth();
+      return;
+    }
+    throw err;
+  }
   currentUser = data.user;
   writeStore(USER_KEY, JSON.stringify(currentUser));
   renderAuth();
