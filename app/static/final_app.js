@@ -129,10 +129,12 @@ function filenameFromDisposition(disposition, fallback = "download") {
   return raw.replace(/[\\/\0]/g, "_").slice(0, 180) || fallback;
 }
 
-function setNotice(id, message) {
+function setNotice(id, message, kind = "error") {
   const el = $(id);
   el.textContent = message || "";
   el.hidden = !message;
+  el.classList.toggle("error", Boolean(message) && kind === "error");
+  el.classList.toggle("success", Boolean(message) && kind === "success");
 }
 
 function formatBytes(bytes) {
@@ -283,6 +285,10 @@ async function submitAuth(event) {
     fillSettingsForm();
     $("auth-dialog").close();
     $("auth-form").reset();
+    if (data.email_error) {
+      setNotice("settings-error", `Account created, but email was not sent: ${data.email_error}`, "error");
+      setTextIfPresent("account-bio", `Email verification could not be sent: ${data.email_error}`);
+    }
     await refreshAll();
   } catch (err) {
     setNotice("auth-error", err.message);
@@ -360,7 +366,7 @@ async function submitSettings(event) {
     writeStore(USER_KEY, JSON.stringify(currentUser));
     renderAuth();
     fillSettingsForm();
-    setNotice("settings-error", "Saved.");
+    setNotice("settings-error", "Saved.", "success");
     await refreshAll();
   } catch (err) {
     setNotice("settings-error", err.message);
@@ -381,6 +387,7 @@ async function saveEmailAndSendCode() {
     renderAuth();
     fillSettingsForm();
     setTextIfPresent("settings-email-status", data.email_verification_sent ? "Verification code sent." : "Email saved.");
+    setNotice("settings-error", data.email_verification_sent ? "Verification code sent." : "Email saved.", "success");
   } catch (err) {
     setNotice("settings-error", err.message);
   }
@@ -400,7 +407,7 @@ async function verifyEmailCode() {
     writeStore(USER_KEY, JSON.stringify(currentUser));
     renderAuth();
     fillSettingsForm();
-    setNotice("settings-error", "Email verified.");
+    setNotice("settings-error", "Email verified.", "success");
   } catch (err) {
     setNotice("settings-error", err.message);
   }
@@ -425,7 +432,7 @@ async function submitAgeVerification(event) {
     fillSettingsForm();
     revealedAdultMedia.clear();
     if (safeEl("age-dialog")?.open) $("age-dialog").close();
-    setNotice(noticeId, "Age verified.");
+    setNotice(noticeId, "Age verified.", "success");
     await refreshAll();
   } catch (err) {
     setNotice(noticeId, err.message);
@@ -592,17 +599,22 @@ async function loadCategories() {
   categories = data.categories || [];
   const filter = $("category-filter");
   const upload = $("upload-category");
+  const edit = safeEl("edit-media-category");
   const selectedFilter = filter.value;
   const selectedUpload = upload.value;
+  const selectedEdit = edit?.value || "";
   filter.innerHTML = `<option value="">All categories</option>`;
   upload.innerHTML = `<option value="">Create new category</option>`;
+  if (edit) edit.innerHTML = "";
   for (const category of categories) {
     const count = isDesmondUser() ? ` (${category.media_count || 0})` : "";
     filter.insertAdjacentHTML("beforeend", `<option value="${category.id}">${escapeHtml(category.name)}${count}</option>`);
     upload.insertAdjacentHTML("beforeend", `<option value="${category.id}">${escapeHtml(category.name)}</option>`);
+    if (edit) edit.insertAdjacentHTML("beforeend", `<option value="${category.id}">${escapeHtml(category.name)}</option>`);
   }
   filter.value = selectedFilter;
   upload.value = selectedUpload || (categories[0]?.id ?? "");
+  if (edit) edit.value = selectedEdit || (categories[0]?.id ?? "");
   toggleNewCategory();
 }
 
@@ -890,48 +902,59 @@ async function openStudio() {
         <h3>${adultBadge(item)}${escapeHtml(item.title)}</h3>
         <p class="muted">${item.views || 0} views · ${item.downloads || 0} downloads · ${item.like_count || 0} likes</p>
       </div>
-      <button type="button" data-edit-media="${item.id}">Edit</button>\n      <button type="button" data-delete-media="${item.id}">Delete</button>
+      <button type="button" data-edit-media="${item.id}">Edit</button>
+      <button type="button" data-delete-media="${item.id}">Delete</button>
     </article>
   `).join("") : `<p class="muted">You have not uploaded anything yet.</p>`;
-  $("studio-dialog").showModal();
+  if (!$("studio-dialog").open) $("studio-dialog").showModal();
 }
 
 async function editOwnMedia(id) {
   const item = (await apiFetch(`/api/media/${id}`)).media;
-  const title = prompt("Manage post - title:", item.title || "");
-  if (title === null) return;
-  const description = prompt("Manage post - description:", item.description || "");
-  if (description === null) return;
-  const tags = prompt("Manage post - tags, comma separated:", (item.tags || []).join(", "));
-  if (tags === null) return;
-  const visibility = (prompt("Visibility: public, unlisted, or private", item.visibility || "public") || "public").toLowerCase();
-  if (!["public", "unlisted", "private"].includes(visibility)) return alert("Visibility must be public, unlisted, or private.");
-  const commentsEnabled = confirm("Allow comments on this post? OK = yes, Cancel = no");
-  const downloadsEnabled = confirm("Allow downloads on this post? OK = yes, Cancel = no");
-  const pinned = confirm("Pin this post to the top of your results? OK = yes, Cancel = no");
-  const adult = confirm("Mark this post as 18+? OK = yes, Cancel = no");
-  const categoryOptions = categories.map((cat) => `${cat.id}: ${cat.name}`).join("\n");
-  const categoryRaw = prompt(`Category ID:\n${categoryOptions}`, item.category_id || categories[0]?.id || "");
-  if (categoryRaw === null) return;
-  const categoryId = Number(categoryRaw || item.category_id || categories[0]?.id || 0);
-  const data = await apiFetch(`/api/media/${id}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      title,
-      description,
-      category_id: categoryId,
-      tags: tags.split(",").map((tag) => tag.trim()).filter(Boolean),
-      is_adult: adult,
-      visibility,
-      comments_enabled: commentsEnabled,
-      downloads_enabled: downloadsEnabled,
-      pinned,
-    }),
-  });
-  mediaItems = mediaItems.map((entry) => Number(entry.id) === Number(id) ? data.media : entry);
-  await openStudio();
-  await refreshAll();
+  setNotice("edit-media-error", "");
+  $("edit-media-id").value = item.id;
+  $("edit-media-title").value = item.title || "";
+  $("edit-media-description").value = item.description || "";
+  $("edit-media-tags").value = (item.tags || []).join(", ");
+  $("edit-media-category").value = item.category_id || categories[0]?.id || "";
+  $("edit-media-visibility").value = item.visibility || "public";
+  $("edit-media-comments-enabled").checked = item.comments_enabled !== false;
+  $("edit-media-downloads-enabled").checked = item.downloads_enabled !== false;
+  $("edit-media-pinned").checked = Boolean(item.pinned_at);
+  $("edit-media-adult").checked = Boolean(item.is_adult);
+  $("edit-media-dialog").showModal();
+}
+
+async function submitEditMedia(event) {
+  event.preventDefault();
+  const id = $("edit-media-id").value;
+  const title = $("edit-media-title").value.trim();
+  const categoryId = Number($("edit-media-category").value || categories[0]?.id || 0);
+  if (!title) return setNotice("edit-media-error", "Title is required.");
+  if (!categoryId) return setNotice("edit-media-error", "Choose a category.");
+  try {
+    const data = await apiFetch(`/api/media/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title,
+        description: $("edit-media-description").value.trim() || null,
+        category_id: categoryId,
+        tags: $("edit-media-tags").value.split(",").map((tag) => tag.trim()).filter(Boolean),
+        is_adult: $("edit-media-adult").checked,
+        visibility: $("edit-media-visibility").value,
+        comments_enabled: $("edit-media-comments-enabled").checked,
+        downloads_enabled: $("edit-media-downloads-enabled").checked,
+        pinned: $("edit-media-pinned").checked,
+      }),
+    });
+    mediaItems = mediaItems.map((entry) => Number(entry.id) === Number(id) ? data.media : entry);
+    $("edit-media-dialog").close();
+    await openStudio();
+    await refreshAll();
+  } catch (err) {
+    setNotice("edit-media-error", err.message);
+  }
 }
 
 async function restoreOwnMedia(id) {
@@ -980,7 +1003,7 @@ async function submitReport(event) {
         details: $("report-details").value,
       }),
     });
-    setNotice("report-error", "Report sent.");
+    setNotice("report-error", "Report sent.", "success");
     $("report-dialog").close();
   } catch (err) {
     setNotice("report-error", err.message);
@@ -1246,6 +1269,8 @@ function bindEvents() {
   $("upload-open").addEventListener("click", () => currentUser ? $("upload-dialog").showModal() : $("auth-dialog").showModal());
   if ($("upload-close")) $("upload-close").addEventListener("click", closeUploadDialog);
   $("upload-form").addEventListener("submit", submitUpload);
+  on("edit-media-close", "click", () => $("edit-media-dialog").close());
+  on("edit-media-form", "submit", submitEditMedia);
   $("upload-category").addEventListener("change", toggleNewCategory);
   $("upload-file").addEventListener("change", () => {
     const file = $("upload-file").files[0];

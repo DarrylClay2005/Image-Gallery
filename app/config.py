@@ -1,4 +1,5 @@
 import os
+import socket
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +23,11 @@ def _env_csv(name: str) -> list[str]:
 def _db_host() -> str:
     explicit = _env("GALLERY_DB_HOST")
     if explicit:
+        if explicit == "host.docker.internal":
+            try:
+                socket.gethostbyname(explicit)
+            except OSError:
+                return "127.0.0.1"
         return explicit
     inherited = _env("DB_HOST") or _env("MYSQL_HOST")
     if inherited and inherited != "host.docker.internal":

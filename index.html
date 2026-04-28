@@ -414,6 +414,52 @@
     </form>
   </dialog>
 
+  <dialog id="edit-media-dialog" class="modal">
+    <form class="modal-shell wide" id="edit-media-form">
+      <div class="modal-head">
+        <h2>Manage Post</h2>
+        <button id="edit-media-close" class="icon-button" type="button" aria-label="Close">X</button>
+      </div>
+      <div id="edit-media-error" class="notice error" hidden></div>
+      <input id="edit-media-id" type="hidden" />
+      <div class="form-grid">
+        <label class="field">
+          <span>Title</span>
+          <input id="edit-media-title" maxlength="160" required />
+        </label>
+        <label class="field">
+          <span>Category</span>
+          <select id="edit-media-category" required></select>
+        </label>
+      </div>
+      <label class="field">
+        <span>Description</span>
+        <textarea id="edit-media-description" rows="3" maxlength="2000"></textarea>
+      </label>
+      <label class="field">
+        <span>Tags</span>
+        <input id="edit-media-tags" placeholder="neon, funny, anime, desktop" />
+      </label>
+      <div class="upload-controls-grid">
+        <label class="field">
+          <span>Visibility</span>
+          <select id="edit-media-visibility">
+            <option value="public">Public - appears in the gallery</option>
+            <option value="unlisted">Unlisted - link/profile only</option>
+            <option value="private">Private - only me</option>
+          </select>
+        </label>
+        <label class="check-row"><input id="edit-media-comments-enabled" type="checkbox" checked /> Allow comments</label>
+        <label class="check-row"><input id="edit-media-downloads-enabled" type="checkbox" checked /> Allow downloads</label>
+        <label class="check-row"><input id="edit-media-pinned" type="checkbox" /> Pin in my studio/feed</label>
+        <label class="check-row"><input id="edit-media-adult" type="checkbox" /> Mark as 18+</label>
+      </div>
+      <div class="modal-actions">
+        <button class="primary" type="submit">Save Post</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="detail-dialog" class="modal detail-modal">
     <div class="modal-shell detail-shell">
       <div class="modal-head">

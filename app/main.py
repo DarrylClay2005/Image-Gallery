@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from .auth import extract_bearer_token, issue_token, require_auth, verify_token
 from .config import ROOT_DIR, load_settings
 from .database import GalleryDatabase
-from .emailer import send_verification_email
+from .emailer import EmailDeliveryError, send_verification_email
 
 
 settings = load_settings()
@@ -241,7 +241,10 @@ def _fallback_avatar_svg(user_id: int) -> str:
 
 
 def _verification_url(request: Request, token: str) -> str:
-    return str(request.url_for("verify_email")).replace("http://", "https://") + f"?token={token}"
+    url = str(request.url_for("verify_email"))
+    if request.url.hostname not in {"127.0.0.1", "localhost"}:
+        url = url.replace("http://", "https://", 1)
+    return f"{url}?token={token}"
 
 
 def _verification_code() -> str:
@@ -251,6 +254,22 @@ def _verification_code() -> str:
 def _wants_json(request: Request) -> bool:
     accept = request.headers.get("accept", "")
     return "application/json" in accept and "text/html" not in accept
+
+
+def _send_verification_or_error(request: Request, user: dict[str, Any], email_token: str) -> bool:
+    try:
+        send_verification_email(settings, user["email"], _verification_url(request, email_token), email_token)
+        return True
+    except EmailDeliveryError as exc:
+        raise HTTPException(status_code=502, detail=f"Email verification could not be sent: {exc}") from None
+
+
+def _try_send_verification(request: Request, user: dict[str, Any], email_token: str) -> tuple[bool, str | None]:
+    try:
+        send_verification_email(settings, user["email"], _verification_url(request, email_token), email_token)
+        return True, None
+    except EmailDeliveryError as exc:
+        return False, str(exc)
 
 
 def _verification_page(title: str, message: str, *, ok: bool) -> HTMLResponse:
@@ -571,9 +590,15 @@ async def register(payload: RegisterRequest, request: Request) -> dict[str, Any]
             raise HTTPException(status_code=409, detail="That username or email is already taken.") from None
         raise
     verification_sent = False
+    email_error = None
     if user.get("email") and email_token:
-        verification_sent = send_verification_email(settings, user["email"], _verification_url(request, email_token), email_token)
-    return {"user": _jsonable(user), "token": issue_token(settings.session_secret, user), "email_verification_sent": verification_sent}
+        verification_sent, email_error = _try_send_verification(request, user, email_token)
+    return {
+        "user": _jsonable(user),
+        "token": issue_token(settings.session_secret, user),
+        "email_verification_sent": verification_sent,
+        "email_error": email_error,
+    }
 
 
 @app.get("/api/auth/verify-email", name="verify_email")
@@ -600,7 +625,7 @@ async def resend_verification(request: Request) -> dict[str, Any]:
         return {"ok": True, "email_verification_sent": False, "already_verified": True}
     email_token = _verification_code()
     user = await db.issue_email_verification_token(int(auth["id"]), email_token)
-    verification_sent = bool(user and send_verification_email(settings, user["email"], _verification_url(request, email_token), email_token))
+    verification_sent = bool(user and _send_verification_or_error(request, user, email_token))
     return {"ok": verification_sent, "email_verification_sent": verification_sent, "already_verified": False}
 
 
@@ -615,7 +640,7 @@ async def update_email(payload: EmailUpdateRequest, request: Request) -> dict[st
     if user and user.get("email"):
         email_token = _verification_code()
         user = await db.issue_email_verification_token(int(auth["id"]), email_token)
-        verification_sent = bool(user and send_verification_email(settings, user["email"], _verification_url(request, email_token), email_token))
+        verification_sent = bool(user and _send_verification_or_error(request, user, email_token))
     return {"ok": True, "user": _jsonable(user), "email_verification_sent": verification_sent}
 
 
