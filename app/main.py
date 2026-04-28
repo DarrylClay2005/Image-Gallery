@@ -493,10 +493,6 @@ async def live_checks(request: Request) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     try:
         snapshot = await db.site_checks()
-        if int(snapshot.get("missing_db_files") or 0) > 0:
-            migrated = await db.migrate_legacy_media_files(limit=25)
-            if migrated.get("migrated"):
-                snapshot = await db.site_checks()
         checks.append({"id": "api", "label": "API reachable", "ok": True, "detail": "Backend responded."})
         checks.append({"id": "db", "label": "Database reachable", "ok": True, "detail": f"Schema {settings.db_schema} responded."})
         missing = int(snapshot.get("missing_db_files") or 0)
@@ -529,6 +525,11 @@ async def live_checks(request: Request) -> dict[str, Any]:
         status = "ok" if all(c.get("ok") or c.get("severity") == "warn" for c in checks) else "attention"
         return {"ok": True, "status": status, "checks": checks, "snapshot": _jsonable(snapshot), "server_time": datetime.utcnow().isoformat() + "Z"}
     except Exception as exc:
+        if "Packet sequence number wrong" in str(exc):
+            try:
+                await db.reconnect()
+            except Exception:
+                pass
         return {
             "ok": False,
             "status": "offline",
@@ -536,6 +537,26 @@ async def live_checks(request: Request) -> dict[str, Any]:
             "snapshot": {},
             "server_time": datetime.utcnow().isoformat() + "Z",
         }
+
+
+@app.post("/api/live/migrate")
+async def migrate_legacy_files(request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    # Only the site owner should trigger DB BLOB backfills from the public frontend.
+    user = await db.get_user(int(auth["id"]))
+    if not user or str(user.get("username") or "").lower() not in {"heavenlyxenusvr", "desmond"}:
+        raise HTTPException(status_code=403, detail="Only the site owner can run DB file migration.")
+    try:
+        migrated = await db.migrate_legacy_media_files(limit=10)
+        snapshot = await db.site_checks()
+        return {"ok": True, "migrated": migrated, "snapshot": _jsonable(snapshot)}
+    except Exception as exc:
+        if "Packet sequence number wrong" in str(exc):
+            try:
+                await db.reconnect()
+            except Exception:
+                pass
+        raise HTTPException(status_code=500, detail=f"Migration failed: {str(exc)[:220]}") from None
 
 
 @app.post("/api/auth/register")
@@ -909,8 +930,27 @@ async def upload_media(
     )
     _rate_limit(f"upload:{auth['id']}", limit=60, window_seconds=3600)
     uploaded = await _read_validated_upload(file, settings.max_upload_bytes)
+    packet_limit = await db.get_max_allowed_packet()
+    if packet_limit and uploaded["file_size"] + (2 * 1024 * 1024) > packet_limit:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"This upload is {uploaded['file_size'] // (1024 * 1024)}MB, but MariaDB max_allowed_packet is "
+                f"only {packet_limit // (1024 * 1024)}MB. Raise MariaDB max_allowed_packet to at least 512M/1G "
+                "or use smaller files."
+            ),
+        )
     media_kind = uploaded["media_kind"]
-    media_file = await db.save_media_file(user_id=int(auth["id"]), **uploaded)
+    try:
+        media_file = await db.save_media_file(user_id=int(auth["id"]), **uploaded)
+    except Exception as exc:
+        if "Packet sequence number wrong" in str(exc):
+            try:
+                await db.reconnect()
+            except Exception:
+                pass
+            raise HTTPException(status_code=503, detail="Database connection reset during upload. Try again; if this repeats, raise MariaDB max_allowed_packet.") from None
+        raise
     if media_file.get("duplicate"):
         raise HTTPException(status_code=409, detail="That exact file is already stored in the gallery database.")
     if media_file["sha256"] != uploaded["sha256"]:

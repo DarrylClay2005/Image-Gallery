@@ -1,4 +1,5 @@
 import json
+import asyncio
 import re
 import hashlib
 import mimetypes
@@ -97,6 +98,7 @@ class GalleryDatabase:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.pool: aiomysql.Pool | None = None
+        self._blob_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         await self._ensure_schema()
@@ -109,6 +111,7 @@ class GalleryDatabase:
             autocommit=True,
             minsize=1,
             maxsize=10,
+            pool_recycle=180,
         )
         await self.ensure_tables()
 
@@ -117,6 +120,18 @@ class GalleryDatabase:
             self.pool.close()
             await self.pool.wait_closed()
             self.pool = None
+
+    async def reconnect(self) -> None:
+        await self.close()
+        await self.connect()
+
+    async def get_max_allowed_packet(self) -> int:
+        async with self.pool.acquire() as conn:
+            await conn.ping(reconnect=True)
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SHOW VARIABLES LIKE 'max_allowed_packet'")
+                row = await cur.fetchone() or {}
+                return int(row.get("Value") or row.get("value") or 0)
 
     async def _ensure_schema(self) -> None:
         conn = await aiomysql.connect(
@@ -661,28 +676,32 @@ class GalleryDatabase:
                 return list(await cur.fetchall())
 
     async def save_media_file(self, *, user_id: int, content: bytes, sha256: str, mime_type: str, original_filename: str, media_kind: str) -> dict[str, Any]:
-        async with self.pool.acquire() as conn:
-            async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute(
-                    "SELECT id, sha256, mime_type, original_filename, media_kind, file_size, created_by, created_at FROM media_files WHERE sha256=%s",
-                    (sha256,),
-                )
-                existing = await cur.fetchone()
-                if existing:
-                    return dict(existing, duplicate=True)
-                await cur.execute(
-                    """
-                    INSERT INTO media_files (sha256, mime_type, original_filename, media_kind, file_size, content, created_by)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (sha256, mime_type[:120], original_filename[:255], media_kind, len(content), content, user_id),
-                )
-                await cur.execute(
-                    "SELECT id, sha256, mime_type, original_filename, media_kind, file_size, created_by, created_at FROM media_files WHERE id=%s",
-                    (cur.lastrowid,),
-                )
-                row = await cur.fetchone()
-                return dict(row, duplicate=False)
+        # BLOB inserts are packet-heavy. Serialize these writes so live migration and
+        # user uploads cannot corrupt an aiomysql connection with interleaved packets.
+        async with self._blob_lock:
+            async with self.pool.acquire() as conn:
+                await conn.ping(reconnect=True)
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute(
+                        "SELECT id, sha256, mime_type, original_filename, media_kind, file_size, created_by, created_at FROM media_files WHERE sha256=%s",
+                        (sha256,),
+                    )
+                    existing = await cur.fetchone()
+                    if existing:
+                        return dict(existing, duplicate=True)
+                    await cur.execute(
+                        """
+                        INSERT INTO media_files (sha256, mime_type, original_filename, media_kind, file_size, content, created_by)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (sha256, mime_type[:120], original_filename[:255], media_kind, len(content), content, user_id),
+                    )
+                    await cur.execute(
+                        "SELECT id, sha256, mime_type, original_filename, media_kind, file_size, created_by, created_at FROM media_files WHERE id=%s",
+                        (cur.lastrowid,),
+                    )
+                    row = await cur.fetchone()
+                    return dict(row, duplicate=False)
 
     async def get_media_file(self, media_id: int) -> dict[str, Any] | None:
         async with self.pool.acquire() as conn:
@@ -1454,64 +1473,66 @@ class GalleryDatabase:
                 )
                 return await cur.fetchone()
 
-    async def migrate_legacy_media_files(self, limit: int = 25) -> dict[str, Any]:
-        """Copy old disk-backed uploads into media_files and link media_items."""
+    async def migrate_legacy_media_files(self, limit: int = 10) -> dict[str, Any]:
+        """Copy old disk-backed uploads into media_files and link media_items safely."""
         migrated = 0
         missing = 0
-        async with self.pool.acquire() as conn:
-            async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute(
-                    """
-                    SELECT id, user_id, storage_path, mime_type, original_filename, media_kind
-                    FROM media_items
-                    WHERE deleted_at IS NULL AND (media_file_id IS NULL OR media_file_id=0)
-                    ORDER BY id ASC
-                    LIMIT %s
-                    """,
-                    (max(1, min(int(limit or 25), 100)),),
-                )
-                rows = list(await cur.fetchall())
-                uploads_root = Path(self.settings.uploads_dir).resolve()
-                for row in rows:
-                    raw = str(row.get("storage_path") or "")
-                    if raw.startswith("db://"):
-                        missing += 1
-                        continue
-                    raw = raw.replace("\\", "/").lstrip("/")
-                    if raw.startswith("uploads/"):
-                        raw = raw.split("/", 1)[1]
-                    path = (uploads_root / raw).resolve()
-                    try:
-                        path.relative_to(uploads_root)
-                    except ValueError:
-                        missing += 1
-                        continue
-                    if not path.is_file():
-                        missing += 1
-                        continue
-                    content = path.read_bytes()
-                    sha256 = hashlib.sha256(content).hexdigest()
-                    mime_type = (row.get("mime_type") or mimetypes.guess_type(str(path))[0] or "application/octet-stream")[:120]
-                    media_kind = row.get("media_kind") if row.get("media_kind") in {"image", "video"} else ("video" if mime_type.startswith("video/") else "image")
-                    original = (row.get("original_filename") or path.name)[:255]
-                    await cur.execute("SELECT id FROM media_files WHERE sha256=%s", (sha256,))
-                    file_row = await cur.fetchone()
-                    if file_row:
-                        file_id = int(file_row["id"])
-                    else:
-                        await cur.execute(
-                            """
-                            INSERT INTO media_files (sha256, mime_type, original_filename, media_kind, file_size, content, created_by)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                            """,
-                            (sha256, mime_type, original, media_kind, len(content), content, row.get("user_id")),
-                        )
-                        file_id = int(cur.lastrowid)
+        async with self._blob_lock:
+            async with self.pool.acquire() as conn:
+                await conn.ping(reconnect=True)
+                async with conn.cursor(aiomysql.DictCursor) as cur:
                     await cur.execute(
-                        "UPDATE media_items SET media_file_id=%s, content_sha256=%s, file_size=%s, storage_path=%s WHERE id=%s",
-                        (file_id, sha256, len(content), f"db://media/{file_id}", row["id"]),
+                        """
+                        SELECT id, user_id, storage_path, mime_type, original_filename, media_kind
+                        FROM media_items
+                        WHERE deleted_at IS NULL AND (media_file_id IS NULL OR media_file_id=0)
+                        ORDER BY id ASC
+                        LIMIT %s
+                        """,
+                        (max(1, min(int(limit or 10), 25)),),
                     )
-                    migrated += 1
+                    rows = list(await cur.fetchall())
+                    uploads_root = Path(self.settings.uploads_dir).resolve()
+                    for row in rows:
+                        raw = str(row.get("storage_path") or "")
+                        if raw.startswith("db://"):
+                            missing += 1
+                            continue
+                        raw = raw.replace("\\", "/").lstrip("/")
+                        if raw.startswith("uploads/"):
+                            raw = raw.split("/", 1)[1]
+                        path = (uploads_root / raw).resolve()
+                        try:
+                            path.relative_to(uploads_root)
+                        except ValueError:
+                            missing += 1
+                            continue
+                        if not path.is_file():
+                            missing += 1
+                            continue
+                        content = path.read_bytes()
+                        sha256 = hashlib.sha256(content).hexdigest()
+                        mime_type = (row.get("mime_type") or mimetypes.guess_type(str(path))[0] or "application/octet-stream")[:120]
+                        media_kind = row.get("media_kind") if row.get("media_kind") in {"image", "video"} else ("video" if mime_type.startswith("video/") else "image")
+                        original = (row.get("original_filename") or path.name)[:255]
+                        await cur.execute("SELECT id FROM media_files WHERE sha256=%s", (sha256,))
+                        file_row = await cur.fetchone()
+                        if file_row:
+                            file_id = int(file_row["id"])
+                        else:
+                            await cur.execute(
+                                """
+                                INSERT INTO media_files (sha256, mime_type, original_filename, media_kind, file_size, content, created_by)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                                """,
+                                (sha256, mime_type, original, media_kind, len(content), content, row.get("user_id")),
+                            )
+                            file_id = int(cur.lastrowid)
+                        await cur.execute(
+                            "UPDATE media_items SET media_file_id=%s, content_sha256=%s, file_size=%s, storage_path=%s WHERE id=%s",
+                            (file_id, sha256, len(content), f"db://media/{file_id}", row["id"]),
+                        )
+                        migrated += 1
         return {"migrated": migrated, "missing": missing}
 
 

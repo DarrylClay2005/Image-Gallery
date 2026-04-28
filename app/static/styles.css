@@ -703,3 +703,28 @@ img, video { max-width: 100%; height: auto; }
     grid-template-columns: 1fr;
   }
 }
+
+/* Patch: stronger small-screen and modal clipping fixes */
+* { box-sizing: border-box; }
+button, input, select, textarea { max-width: 100%; }
+.media-card, .panel, .modal-shell, .sidebar, .media-info { min-width: 0; }
+.media-info h2, .media-info p, .metric-row, .card-actions { overflow-wrap: anywhere; }
+.card-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.card-actions button, .card-actions a, .card-actions .button-link { flex: 1 1 auto; min-width: max-content; }
+#detail-media video, #detail-media img { max-height: min(70vh, 720px); object-fit: contain; }
+@media (max-width: 560px) {
+  body { font-size: 14px; }
+  .layout { width: calc(100vw - 12px); grid-template-columns: minmax(0, 1fr); }
+  .sidebar { order: 2; }
+  .content { order: 1; min-width: 0; }
+  .gallery-grid { grid-template-columns: minmax(0, 1fr) !important; gap: 12px; }
+  .media-card { border-radius: 12px; overflow: hidden; }
+  .media-preview { min-height: 180px; }
+  .metric-row { flex-wrap: wrap; gap: 8px; }
+  .card-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .card-actions button, .card-actions a, .card-actions .button-link { width: 100%; min-width: 0; padding-inline: 8px; }
+  dialog { width: calc(100vw - 12px); max-width: calc(100vw - 12px); }
+  .modal-shell { width: 100%; padding: 12px; }
+  .detail-layout { grid-template-columns: minmax(0, 1fr) !important; }
+  .upload-controls-grid, .settings-grid { grid-template-columns: minmax(0, 1fr) !important; }
+}

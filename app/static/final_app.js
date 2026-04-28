@@ -898,11 +898,11 @@ async function openStudio() {
 
 async function editOwnMedia(id) {
   const item = (await apiFetch(`/api/media/${id}`)).media;
-  const title = prompt("Edit title:", item.title || "");
+  const title = prompt("Manage post - title:", item.title || "");
   if (title === null) return;
-  const description = prompt("Edit description:", item.description || "");
+  const description = prompt("Manage post - description:", item.description || "");
   if (description === null) return;
-  const tags = prompt("Edit tags, comma separated:", (item.tags || []).join(", "));
+  const tags = prompt("Manage post - tags, comma separated:", (item.tags || []).join(", "));
   if (tags === null) return;
   const visibility = (prompt("Visibility: public, unlisted, or private", item.visibility || "public") || "public").toLowerCase();
   if (!["public", "unlisted", "private"].includes(visibility)) return alert("Visibility must be public, unlisted, or private.");
@@ -1115,9 +1115,13 @@ function renderLiveChecks(data, silent = false) {
     status.dataset.state = failing.length ? "error" : warnings.length ? "warn" : "ok";
     status.hidden = false;
   }
+  const missing = Number(data?.snapshot?.missing_db_files || 0);
   if (!silent && checks.length) {
-    alert(checks.map((check) => `${check.ok ? "✓" : check.severity === "warn" ? "!" : "✕"} ${check.label}: ${check.detail}`).join("\n"));
+    let message = checks.map((check) => `${check.ok ? "✓" : check.severity === "warn" ? "!" : "✕"} ${check.label}: ${check.detail}`).join("\n");
+    if (missing > 0 && isDesmondUser()) message += `\n\n${missing} legacy file(s) still need migration. Use OK on the next prompt to migrate up to 10 safely.`;
+    alert(message);
   }
+  return { missing };
 }
 
 async function runLiveChecks({ silent = false } = {}) {
@@ -1127,7 +1131,12 @@ async function runLiveChecks({ silent = false } = {}) {
   }
   try {
     const data = await apiFetch("/api/live/checks");
-    renderLiveChecks(data, silent);
+    const rendered = renderLiveChecks(data, silent);
+    if (!silent && rendered.missing > 0 && isDesmondUser() && confirm("Run a safe DB file migration batch now? This migrates up to 10 legacy disk files to DB blobs and may take a moment.")) {
+      const migrated = await apiFetch("/api/live/migrate", { method: "POST" });
+      alert(`Migration batch complete. Migrated: ${migrated.migrated?.migrated || 0}. Missing after batch: ${migrated.snapshot?.missing_db_files || 0}.`);
+      return runLiveChecks({ silent: true });
+    }
     return data;
   } catch (err) {
     renderLiveChecks({ checks: [{ label: "Backend", ok: false, severity: "error", detail: err.message }] }, silent);
