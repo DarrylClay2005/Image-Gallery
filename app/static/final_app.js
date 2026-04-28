@@ -20,6 +20,12 @@ const DEFAULT_USER_SETTINGS = {
   profile_show_friends: true,
   profile_show_follow_counts: true,
 };
+const ACCOUNT_NAVIGATION = {
+  signedOutUsernameTarget: "auth",
+  signedInUsernameTarget: "profile",
+  sidebarProfileTarget: "profile",
+  settingsTarget: "settings",
+};
 
 let apiOrigin = "";
 let token = readStore(TOKEN_KEY);
@@ -197,6 +203,7 @@ function escapeHtml(value) {
 
 function renderAuth() {
   $("auth-open").textContent = currentUser ? currentUser.display_name || currentUser.username : "Login";
+  $("auth-open").title = currentUser ? "Open your profile" : "Login";
   $("logout").hidden = !currentUser;
   $("settings-open").hidden = !currentUser;
   $("studio-open").hidden = !currentUser;
@@ -205,6 +212,8 @@ function renderAuth() {
   $("account-card").hidden = !currentUser;
   if (currentUser) {
     $("account-name").textContent = currentUser.display_name || currentUser.username;
+    $("account-name").title = `Open @${currentUser.username}`;
+    $("account-avatar").title = `Open @${currentUser.username}`;
     const emailNote = currentUser.email && !currentUser.email_verified
       ? " Email verification is pending; enter the emailed code in settings."
       : currentUser.email_verified
@@ -1347,10 +1356,17 @@ function resetUploadProgress() {
   }
 }
 
-function openAccountPanel() {
+function openSettingsPanel() {
   if (!currentUser) return safeEl("auth-dialog")?.showModal();
   fillSettingsForm();
   safeEl("settings-dialog")?.showModal();
+}
+
+async function openCurrentUserDestination(target) {
+  const destination = target || (currentUser ? ACCOUNT_NAVIGATION.signedInUsernameTarget : ACCOUNT_NAVIGATION.signedOutUsernameTarget);
+  if (!currentUser) return safeEl("auth-dialog")?.showModal();
+  if (destination === "settings") return openSettingsPanel();
+  return openProfile(currentUser.username);
 }
 
 async function submitUpload(event) {
@@ -1521,7 +1537,7 @@ function bindEvents() {
       target.closest(".media-preview")?.classList.add("preview-missing");
     }
   }, true);
-  $("auth-open").addEventListener("click", openAccountPanel);
+  $("auth-open").addEventListener("click", () => openCurrentUserDestination());
   if ($("auth-close")) $("auth-close").addEventListener("click", () => $("auth-dialog").close());
   $("logout").addEventListener("click", async () => {
     token = "";
@@ -1534,6 +1550,8 @@ function bindEvents() {
   $("auth-toggle").addEventListener("click", () => setRegisterMode(!registerMode));
   $("auth-form").addEventListener("submit", submitAuth);
   $("resend-email-verification").addEventListener("click", resendEmailVerification);
+  on("account-avatar", "click", () => openCurrentUserDestination(ACCOUNT_NAVIGATION.sidebarProfileTarget));
+  on("account-name", "click", () => openCurrentUserDestination(ACCOUNT_NAVIGATION.sidebarProfileTarget));
   $("settings-email-save").addEventListener("click", saveEmailAndSendCode);
   $("settings-email-verify").addEventListener("click", verifyEmailCode);
   $("surprise-open").addEventListener("click", openSurprise);
@@ -1578,8 +1596,7 @@ function bindEvents() {
     loadMedia();
   });
   $("settings-open").addEventListener("click", () => {
-    fillSettingsForm();
-    $("settings-dialog").showModal();
+    openCurrentUserDestination(ACCOUNT_NAVIGATION.settingsTarget);
   });
   $("settings-form").addEventListener("submit", submitSettings);
   $("settings-age-save").addEventListener("click", submitAgeVerification);

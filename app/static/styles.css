@@ -215,6 +215,17 @@ button:hover, .button-link:hover { border-color: var(--accent); }
   padding: 7px 10px;
   font-size: 0.78rem;
 }
+.account-card .account-profile-trigger {
+  margin-top: 0;
+  cursor: pointer;
+}
+.account-card .account-profile-trigger:hover,
+.account-card .account-profile-trigger:focus-visible {
+  color: var(--accent);
+}
+.account-card .avatar.account-profile-trigger {
+  padding: 0;
+}
 
 .avatar {
   width: 48px;

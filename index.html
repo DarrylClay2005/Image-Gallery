@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#101318" />
   <title>Image Gallery</title>
-  <link rel="stylesheet" href="./app/static/styles.css?v=20260428-upload-ui-packet-500mb" />
+  <link rel="stylesheet" href="./app/static/styles.css?v=20260428-profile-nav" />
 </head>
 <body>
   <header class="topbar">
@@ -76,9 +76,9 @@
         <div id="tag-cloud" class="tag-cloud"></div>
       </div>
       <div id="account-card" class="account-card" hidden>
-        <div id="account-avatar" class="avatar">IG</div>
+        <button id="account-avatar" class="avatar account-profile-trigger" type="button" aria-label="Open your profile">IG</button>
         <div>
-          <strong id="account-name">Signed in</strong>
+          <button id="account-name" class="text-button strong account-profile-trigger" type="button">Signed in</button>
           <p id="account-bio" class="muted">Your settings apply only to this account.</p>
           <button id="resend-email-verification" type="button" hidden>Resend Email Verification</button>
         </div>
@@ -555,6 +555,6 @@
     </div>
   </dialog>
 
-  <script src="./app/static/final_app.js?v=20260428-upload-ui-packet-500mb"></script>
+  <script src="./app/static/final_app.js?v=20260428-profile-nav"></script>
 </body>
 </html>
