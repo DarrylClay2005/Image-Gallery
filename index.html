@@ -58,10 +58,46 @@
             <option value="new">Newest</option>
             <option value="popular">Most liked</option>
             <option value="downloads">Most downloaded</option>
+            <option value="views">Most viewed</option>
             <option value="old">Oldest</option>
           </select>
         </label>
       </div>
+      <details class="sidebar-block advanced-filters" open>
+        <summary>Advanced Filters</summary>
+        <label class="field">
+          <span>Uploader</span>
+          <input id="uploader-filter" type="search" placeholder="username or display name" />
+        </label>
+        <div class="form-grid compact-fields">
+          <label class="field">
+            <span>Min MB</span>
+            <input id="min-size-filter" type="number" min="0" step="1" inputmode="numeric" />
+          </label>
+          <label class="field">
+            <span>Max MB</span>
+            <input id="max-size-filter" type="number" min="0" step="1" inputmode="numeric" />
+          </label>
+        </div>
+        <div class="form-grid compact-fields">
+          <label class="field">
+            <span>From</span>
+            <input id="date-from-filter" type="date" />
+          </label>
+          <label class="field">
+            <span>To</span>
+            <input id="date-to-filter" type="date" />
+          </label>
+        </div>
+        <label class="field">
+          <span>18+ posts</span>
+          <select id="adult-filter">
+            <option value="show">Show when allowed</option>
+            <option value="hide">Hide 18+</option>
+            <option value="only">Only 18+</option>
+          </select>
+        </label>
+      </details>
       <div class="stats-grid">
         <div><strong id="stat-media">0</strong><span>Posts</span></div>
         <div><strong id="stat-likes">0</strong><span>Likes</span></div>
@@ -92,6 +128,12 @@
           <p id="result-count" class="muted">Loading gallery</p>
         </div>
         <div class="content-actions">
+          <button id="slideshow-open" type="button">Slideshow</button>
+          <button id="compare-open" type="button">Compare</button>
+          <button id="insights-open" type="button">Insights</button>
+          <button id="select-page" type="button">Select Page</button>
+          <button id="saved-views-open" type="button">Views</button>
+          <button id="save-view" type="button">Save View</button>
           <button id="share-view" type="button">Share View</button>
           <button id="shortcuts-open" type="button">Shortcuts</button>
           <button id="refresh" type="button">Refresh</button>
@@ -190,6 +232,66 @@
         <button class="primary" type="submit">Add</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="saved-views-dialog" class="modal">
+    <div class="modal-shell wide">
+      <div class="modal-head">
+        <h2>Saved Views</h2>
+        <button id="saved-views-close" class="icon-button" type="button" aria-label="Close">X</button>
+      </div>
+      <form id="saved-view-form" class="collection-form">
+        <input id="saved-view-name" maxlength="80" placeholder="View name" />
+        <button class="primary" type="submit">Save Current</button>
+      </form>
+      <div id="saved-views-list" class="saved-views-list"></div>
+    </div>
+  </dialog>
+
+  <dialog id="compare-dialog" class="modal compare-modal">
+    <div class="modal-shell wide">
+      <div class="modal-head">
+        <h2>Compare Board</h2>
+        <button id="compare-close" class="icon-button" type="button" aria-label="Close">X</button>
+      </div>
+      <div id="compare-grid" class="compare-grid"></div>
+    </div>
+  </dialog>
+
+  <dialog id="slideshow-dialog" class="modal slideshow-modal">
+    <div class="modal-shell slideshow-shell">
+      <div class="modal-head">
+        <h2 id="slideshow-title">Slideshow</h2>
+        <div class="detail-head-actions">
+          <button id="slideshow-prev" type="button">Previous</button>
+          <button id="slideshow-play" type="button">Play</button>
+          <button id="slideshow-next" type="button">Next</button>
+          <button id="slideshow-close" class="icon-button" type="button" aria-label="Close">X</button>
+        </div>
+      </div>
+      <div id="slideshow-stage" class="slideshow-stage"></div>
+      <div class="slideshow-footer">
+        <p id="slideshow-meta" class="muted"></p>
+        <label class="field slideshow-delay">
+          <span>Delay</span>
+          <select id="slideshow-delay">
+            <option value="2500">2.5s</option>
+            <option value="4000" selected>4s</option>
+            <option value="7000">7s</option>
+          </select>
+        </label>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="insights-dialog" class="modal insights-modal">
+    <div class="modal-shell wide">
+      <div class="modal-head">
+        <h2>Gallery Insights</h2>
+        <button id="insights-close" class="icon-button" type="button" aria-label="Close">X</button>
+      </div>
+      <div id="insights-view" class="insights-view"></div>
+    </div>
   </dialog>
 
   <dialog id="report-dialog" class="modal">
@@ -316,6 +418,7 @@
               <option value="new">Newest</option>
               <option value="popular">Most liked</option>
               <option value="downloads">Most downloaded</option>
+              <option value="views">Most viewed</option>
               <option value="old">Oldest</option>
             </select>
           </label>
@@ -382,13 +485,14 @@
       </div>
       <div id="upload-error" class="notice error" hidden></div>
       <label class="drop-zone" for="upload-file">
-        <input id="upload-file" name="file" type="file" accept="image/*,video/*" required />
-        <span id="file-label">Choose image, GIF, or video under 500MB</span>
+        <input id="upload-file" name="file" type="file" accept="image/*,video/*" multiple required />
+        <span id="file-label">Choose images, GIFs, or videos under 500MB each</span>
       </label>
+      <div id="upload-queue" class="upload-queue" hidden></div>
       <div class="form-grid">
         <label class="field">
           <span>Title</span>
-          <input id="upload-title" name="title" maxlength="160" required />
+          <input id="upload-title" name="title" maxlength="160" />
         </label>
         <label class="field">
           <span>Category</span>
@@ -546,7 +650,14 @@
       <div class="detail-grid">
         <div id="detail-media" class="detail-media"></div>
         <aside class="detail-side">
+          <div class="detail-tools">
+            <button id="detail-zoom-out" type="button">Zoom -</button>
+            <button id="detail-zoom-in" type="button">Zoom +</button>
+            <button id="detail-rotate" type="button">Rotate</button>
+            <button id="detail-fit" type="button">Fit</button>
+          </div>
           <p id="detail-meta" class="muted"></p>
+          <div id="detail-inspector" class="detail-inspector"></div>
           <p id="detail-description"></p>
           <div id="detail-tags" class="tag-row"></div>
           <div class="action-row">
@@ -571,6 +682,15 @@
   </dialog>
 
   <button id="back-to-top" class="back-to-top" type="button" hidden>Top</button>
+  <div id="compare-tray" class="compare-tray" hidden>
+    <strong id="compare-count">0 selected</strong>
+    <button id="compare-tray-open" class="primary" type="button">Compare</button>
+    <button id="selection-slideshow" type="button">Slideshow</button>
+    <button id="selection-like" type="button">Like</button>
+    <button id="selection-save" type="button">Save</button>
+    <button id="selection-collect" type="button">Collect</button>
+    <button id="compare-clear" type="button">Clear</button>
+  </div>
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true" hidden></div>
   <script src="./app/static/final_app.js?v=20260428-large-upload-motion"></script>
 </body>

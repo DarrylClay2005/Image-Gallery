@@ -669,7 +669,7 @@ class GalleryDatabase:
         allowed_choices = {
             "theme_mode": {"system", "dark", "light"},
             "grid_density": {"compact", "comfortable", "wide"},
-            "default_sort": {"new", "popular", "downloads", "old"},
+            "default_sort": {"new", "popular", "downloads", "views", "old"},
         }
         for key in DEFAULT_USER_SETTINGS:
             if key not in payload:
@@ -895,6 +895,12 @@ class GalleryDatabase:
         media_kind: str | None = None,
         category_id: int | None = None,
         query: str | None = None,
+        uploader: str | None = None,
+        min_size: int | None = None,
+        max_size: int | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        adult: str | None = None,
         sort: str = "new",
         limit: int = 60,
         offset: int = 0,
@@ -912,10 +918,31 @@ class GalleryDatabase:
             clauses.append("(m.title LIKE %s OR m.description LIKE %s OR m.tags LIKE %s)")
             needle = f"%{query}%"
             params.extend([needle, needle, needle])
+        if uploader:
+            clauses.append("(u.username LIKE %s OR u.display_name LIKE %s)")
+            needle = f"%{uploader}%"
+            params.extend([needle, needle])
+        if min_size is not None:
+            clauses.append("m.file_size >= %s")
+            params.append(max(0, int(min_size)))
+        if max_size is not None:
+            clauses.append("m.file_size <= %s")
+            params.append(max(0, int(max_size)))
+        if date_from:
+            clauses.append("DATE(m.created_at) >= %s")
+            params.append(date_from)
+        if date_to:
+            clauses.append("DATE(m.created_at) <= %s")
+            params.append(date_to)
+        if adult == "only":
+            clauses.append("m.is_adult=1")
+        elif adult == "hide":
+            clauses.append("m.is_adult=0")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         order = {
             "popular": "m.pinned_at DESC, like_count DESC, m.views DESC, m.created_at DESC",
             "downloads": "m.pinned_at DESC, m.downloads DESC, m.created_at DESC",
+            "views": "m.pinned_at DESC, m.views DESC, m.created_at DESC",
             "old": "m.created_at ASC",
         }.get(sort, "m.pinned_at DESC, m.created_at DESC")
         sql_params = [viewer, viewer, viewer, viewer, viewer, viewer, *params, max(1, min(limit, 100)), max(0, offset)]

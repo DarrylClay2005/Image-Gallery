@@ -4,8 +4,10 @@ const CONFIG_FILE = "live-config.json";
 const TOKEN_KEY = "image_gallery_token";
 const USER_KEY = "image_gallery_user";
 const GALLERY_VIEW_KEY = "image_gallery_view";
+const SAVED_VIEWS_KEY = "image_gallery_saved_views";
 const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
 const GALLERY_PAGE_SIZE = 15;
+const COMPARE_SELECTION_LIMIT = 4;
 const LIVE_CHECK_INTERVAL_MS = 15000;
 const SEARCH_DEBOUNCE_MS = 250;
 const DEFAULT_USER_SETTINGS = {
@@ -51,6 +53,13 @@ let uploadStartedAt = 0;
 let activeProfileUsername = "";
 let galleryViewRestored = false;
 let toastTimer = 0;
+let compareSelection = new Set();
+let slideshowIndex = 0;
+let slideshowTimer = 0;
+let slideshowPlaying = false;
+let slideshowItemsOverride = null;
+let detailZoom = 1;
+let detailRotation = 0;
 const revealedAdultMedia = new Set();
 
 const $ = (id) => document.getElementById(id);
@@ -104,6 +113,15 @@ function writeStore(key, value) {
 
 function readJsonStore(key) {
   try { return JSON.parse(readStore(key) || "null"); } catch (_err) { return null; }
+}
+
+function readSavedViews() {
+  const views = readJsonStore(SAVED_VIEWS_KEY);
+  return Array.isArray(views) ? views : [];
+}
+
+function writeSavedViews(views) {
+  writeStore(SAVED_VIEWS_KEY, JSON.stringify(Array.isArray(views) ? views : []));
 }
 
 async function copyText(value, successMessage = "Copied.") {
@@ -241,6 +259,11 @@ function formatBytes(bytes) {
   if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
   if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${value} B`;
+}
+
+function mbToBytes(value) {
+  const number = Number(value || 0);
+  return number > 0 ? Math.round(number * 1024 * 1024) : 0;
 }
 
 function escapeHtml(value) {
@@ -636,6 +659,44 @@ function closeDetailDialog() {
   if (dialog.open) dialog.close();
 }
 
+function applyDetailTransform() {
+  const media = safeEl("detail-media")?.querySelector("img, video");
+  if (!media) return;
+  media.style.transform = `scale(${detailZoom}) rotate(${detailRotation}deg)`;
+  media.style.cursor = detailZoom > 1 ? "zoom-out" : "zoom-in";
+}
+
+function resetDetailTransform() {
+  detailZoom = 1;
+  detailRotation = 0;
+  applyDetailTransform();
+}
+
+function zoomDetail(delta) {
+  detailZoom = Math.max(0.5, Math.min(3, Number((detailZoom + delta).toFixed(2))));
+  applyDetailTransform();
+}
+
+function rotateDetail() {
+  detailRotation = (detailRotation + 90) % 360;
+  applyDetailTransform();
+}
+
+function renderDetailInspector(item) {
+  const inspector = safeEl("detail-inspector");
+  if (!inspector || !item) return;
+  inspector.innerHTML = `
+    <dl>
+      <div><dt>Filename</dt><dd>${escapeHtml(item.original_filename || "Unknown")}</dd></div>
+      <div><dt>Mime</dt><dd>${escapeHtml(item.mime_type || "Unknown")}</dd></div>
+      <div><dt>Visibility</dt><dd>${escapeHtml(item.visibility || "public")}</dd></div>
+      <div><dt>Views</dt><dd>${Number(item.views || 0)}</dd></div>
+      <div><dt>Comments</dt><dd>${Number(item.comment_count || 0)}</dd></div>
+      <div><dt>Uploaded</dt><dd>${escapeHtml(String(item.created_at || "").replace("T", " "))}</dd></div>
+    </dl>
+  `;
+}
+
 async function refreshMe() {
   if (!token) return;
   let data;
@@ -743,6 +804,12 @@ function galleryFiltersActive() {
     safeEl("search")?.value?.trim()
     || safeEl("kind-filter")?.value
     || safeEl("category-filter")?.value
+    || safeEl("uploader-filter")?.value?.trim()
+    || safeEl("min-size-filter")?.value
+    || safeEl("max-size-filter")?.value
+    || safeEl("date-from-filter")?.value
+    || safeEl("date-to-filter")?.value
+    || (safeEl("adult-filter")?.value && safeEl("adult-filter")?.value !== "show")
   );
 }
 
@@ -751,6 +818,12 @@ function galleryViewState() {
     search: safeEl("search")?.value?.trim() || "",
     kind: safeEl("kind-filter")?.value || "",
     category: safeEl("category-filter")?.value || "",
+    uploader: safeEl("uploader-filter")?.value?.trim() || "",
+    minSize: safeEl("min-size-filter")?.value || "",
+    maxSize: safeEl("max-size-filter")?.value || "",
+    dateFrom: safeEl("date-from-filter")?.value || "",
+    dateTo: safeEl("date-to-filter")?.value || "",
+    adult: safeEl("adult-filter")?.value || "show",
     sort: safeEl("sort-filter")?.value || "new",
     page: galleryPage,
   };
@@ -769,12 +842,24 @@ function restoreGalleryViewState() {
     search: params.get("q") ?? stored.search,
     kind: params.get("kind") ?? stored.kind,
     category: params.get("category") ?? stored.category,
+    uploader: params.get("uploader") ?? stored.uploader,
+    minSize: params.get("minSize") ?? stored.minSize,
+    maxSize: params.get("maxSize") ?? stored.maxSize,
+    dateFrom: params.get("from") ?? stored.dateFrom,
+    dateTo: params.get("to") ?? stored.dateTo,
+    adult: params.get("adult") ?? stored.adult,
     sort: params.get("sort") ?? stored.sort,
     page: params.get("page") ?? stored.page,
   };
   if (safeEl("search")) $("search").value = state.search || "";
   if (safeEl("kind-filter")) $("kind-filter").value = state.kind || "";
   if (safeEl("category-filter")) $("category-filter").value = state.category || "";
+  if (safeEl("uploader-filter")) $("uploader-filter").value = state.uploader || "";
+  if (safeEl("min-size-filter")) $("min-size-filter").value = state.minSize || "";
+  if (safeEl("max-size-filter")) $("max-size-filter").value = state.maxSize || "";
+  if (safeEl("date-from-filter")) $("date-from-filter").value = state.dateFrom || "";
+  if (safeEl("date-to-filter")) $("date-to-filter").value = state.dateTo || "";
+  if (safeEl("adult-filter")) $("adult-filter").value = state.adult || "show";
   if (safeEl("sort-filter")) $("sort-filter").value = state.sort || userSettings().default_sort || "new";
   galleryPage = Math.max(1, Number(state.page || 1));
 }
@@ -783,6 +868,12 @@ function clearGalleryFilters() {
   if (safeEl("search")) $("search").value = "";
   if (safeEl("kind-filter")) $("kind-filter").value = "";
   if (safeEl("category-filter")) $("category-filter").value = "";
+  if (safeEl("uploader-filter")) $("uploader-filter").value = "";
+  if (safeEl("min-size-filter")) $("min-size-filter").value = "";
+  if (safeEl("max-size-filter")) $("max-size-filter").value = "";
+  if (safeEl("date-from-filter")) $("date-from-filter").value = "";
+  if (safeEl("date-to-filter")) $("date-to-filter").value = "";
+  if (safeEl("adult-filter")) $("adult-filter").value = "show";
   if (safeEl("sort-filter")) $("sort-filter").value = "new";
   galleryPage = 1;
   saveGalleryViewState();
@@ -798,6 +889,12 @@ function renderActiveFilters() {
   if (state.search) chips.push(["search", `Search: ${state.search}`]);
   if (state.kind) chips.push(["kind", `Type: ${state.kind === "image" ? "Images/GIFs" : "Videos"}`]);
   if (state.category) chips.push(["category", `Category: ${category?.name || state.category}`]);
+  if (state.uploader) chips.push(["uploader", `Uploader: ${state.uploader}`]);
+  if (state.minSize) chips.push(["minSize", `Min: ${state.minSize} MB`]);
+  if (state.maxSize) chips.push(["maxSize", `Max: ${state.maxSize} MB`]);
+  if (state.dateFrom) chips.push(["dateFrom", `From: ${state.dateFrom}`]);
+  if (state.dateTo) chips.push(["dateTo", `To: ${state.dateTo}`]);
+  if (state.adult && state.adult !== "show") chips.push(["adult", state.adult === "only" ? "Only 18+" : "Hide 18+"]);
   if (state.sort && state.sort !== "new") chips.push(["sort", `Sort: ${$("sort-filter").selectedOptions?.[0]?.textContent || state.sort}`]);
   wrap.hidden = chips.length === 0;
   wrap.innerHTML = chips.map(([key, label]) => `<button type="button" data-clear-filter="${key}">${escapeHtml(label)} <span aria-hidden="true">x</span></button>`).join("")
@@ -810,10 +907,121 @@ async function shareCurrentView() {
   if (state.search) params.set("q", state.search);
   if (state.kind) params.set("kind", state.kind);
   if (state.category) params.set("category", state.category);
+  if (state.uploader) params.set("uploader", state.uploader);
+  if (state.minSize) params.set("minSize", state.minSize);
+  if (state.maxSize) params.set("maxSize", state.maxSize);
+  if (state.dateFrom) params.set("from", state.dateFrom);
+  if (state.dateTo) params.set("to", state.dateTo);
+  if (state.adult && state.adult !== "show") params.set("adult", state.adult);
   if (state.sort && state.sort !== "new") params.set("sort", state.sort);
   if (state.page > 1) params.set("page", String(state.page));
   const url = `${location.origin}${location.pathname}${params.toString() ? `?${params}` : ""}`;
   await copyText(url, "Current gallery view copied.");
+}
+
+function describeGalleryState(state) {
+  const pieces = [];
+  const category = categories.find((item) => String(item.id) === String(state.category));
+  if (state.search) pieces.push(`"${state.search}"`);
+  if (state.kind) pieces.push(state.kind === "image" ? "images" : "videos");
+  if (state.category) pieces.push(category?.name || `category ${state.category}`);
+  if (state.uploader) pieces.push(`by ${state.uploader}`);
+  if (state.minSize || state.maxSize) pieces.push(`${state.minSize || 0}-${state.maxSize || "any"} MB`);
+  if (state.dateFrom || state.dateTo) pieces.push(`${state.dateFrom || "any"} to ${state.dateTo || "now"}`);
+  if (state.adult && state.adult !== "show") pieces.push(state.adult === "only" ? "18+ only" : "18+ hidden");
+  pieces.push((state.sort || "new").replace(/^./, (char) => char.toUpperCase()));
+  return pieces.join(" · ");
+}
+
+function defaultSavedViewName(state) {
+  const description = describeGalleryState(state);
+  return description ? description.slice(0, 80) : "Fresh Drops";
+}
+
+function renderSavedViews() {
+  const list = safeEl("saved-views-list");
+  if (!list) return;
+  const views = readSavedViews();
+  list.innerHTML = views.length ? views.map((view) => `
+    <article class="saved-view-card">
+      <div>
+        <h3>${escapeHtml(view.name || "Saved View")}</h3>
+        <p class="muted">${escapeHtml(describeGalleryState(view.state || {}))}</p>
+      </div>
+      <div class="saved-view-actions">
+        <button type="button" data-apply-saved-view="${escapeHtml(view.id)}">Apply</button>
+        <button type="button" data-share-saved-view="${escapeHtml(view.id)}">Share</button>
+        <button type="button" data-delete-saved-view="${escapeHtml(view.id)}">Delete</button>
+      </div>
+    </article>
+  `).join("") : `<p class="muted">No saved views yet. Save a filter setup to jump back to it later.</p>`;
+}
+
+function openSavedViewsDialog() {
+  const state = galleryViewState();
+  const input = safeEl("saved-view-name");
+  if (input && !input.value.trim()) input.value = defaultSavedViewName(state);
+  renderSavedViews();
+  safeEl("saved-views-dialog")?.showModal();
+}
+
+function applyGalleryState(state = {}) {
+  if (safeEl("search")) $("search").value = state.search || "";
+  if (safeEl("kind-filter")) $("kind-filter").value = state.kind || "";
+  if (safeEl("category-filter")) $("category-filter").value = state.category || "";
+  if (safeEl("uploader-filter")) $("uploader-filter").value = state.uploader || "";
+  if (safeEl("min-size-filter")) $("min-size-filter").value = state.minSize || "";
+  if (safeEl("max-size-filter")) $("max-size-filter").value = state.maxSize || "";
+  if (safeEl("date-from-filter")) $("date-from-filter").value = state.dateFrom || "";
+  if (safeEl("date-to-filter")) $("date-to-filter").value = state.dateTo || "";
+  if (safeEl("adult-filter")) $("adult-filter").value = state.adult || "show";
+  if (safeEl("sort-filter")) $("sort-filter").value = state.sort || "new";
+  galleryPage = Math.max(1, Number(state.page || 1));
+  saveGalleryViewState();
+  loadMedia(galleryPage, { scrollToTop: true });
+}
+
+async function saveCurrentView(event) {
+  if (event) event.preventDefault();
+  const state = galleryViewState();
+  const input = safeEl("saved-view-name");
+  const name = (input?.value || defaultSavedViewName(state)).trim().slice(0, 80) || "Saved View";
+  const views = readSavedViews();
+  views.unshift({
+    id: globalThis.crypto?.randomUUID?.() || String(Date.now()),
+    name,
+    state,
+    created_at: new Date().toISOString(),
+  });
+  writeSavedViews(views.slice(0, 24));
+  if (input) input.value = "";
+  renderSavedViews();
+  showToast("View saved.", "success");
+}
+
+async function shareSavedView(id) {
+  const view = readSavedViews().find((item) => item.id === id);
+  if (!view) return;
+  const state = view.state || {};
+  const params = new URLSearchParams();
+  if (state.search) params.set("q", state.search);
+  if (state.kind) params.set("kind", state.kind);
+  if (state.category) params.set("category", state.category);
+  if (state.uploader) params.set("uploader", state.uploader);
+  if (state.minSize) params.set("minSize", state.minSize);
+  if (state.maxSize) params.set("maxSize", state.maxSize);
+  if (state.dateFrom) params.set("from", state.dateFrom);
+  if (state.dateTo) params.set("to", state.dateTo);
+  if (state.adult && state.adult !== "show") params.set("adult", state.adult);
+  if (state.sort && state.sort !== "new") params.set("sort", state.sort);
+  if (Number(state.page) > 1) params.set("page", String(state.page));
+  const url = `${location.origin}${location.pathname}${params.toString() ? `?${params}` : ""}`;
+  await copyText(url, "Saved view link copied.");
+}
+
+function deleteSavedView(id) {
+  writeSavedViews(readSavedViews().filter((view) => view.id !== id));
+  renderSavedViews();
 }
 
 function setEmptyState(title, message, visible = true) {
@@ -832,6 +1040,21 @@ function updateGalleryPagination() {
   setDisabledIfPresent("gallery-next", !galleryHasNext);
 }
 
+function renderGallerySkeleton(count = 8) {
+  const grid = safeEl("gallery-grid");
+  if (!grid) return;
+  grid.innerHTML = Array.from({ length: count }).map((_, index) => `
+    <article class="media-card skeleton-card" style="--delay:${index * 45}ms">
+      <div class="skeleton-preview"></div>
+      <div class="media-info">
+        <div class="skeleton-line strong"></div>
+        <div class="skeleton-line"></div>
+        <div class="skeleton-actions"><span></span><span></span><span></span></div>
+      </div>
+    </article>
+  `).join("");
+}
+
 async function loadMedia(page = galleryPage, { scrollToTop = false } = {}) {
   galleryMode = "main";
   galleryPage = Math.max(1, Number(page) || 1);
@@ -840,11 +1063,18 @@ async function loadMedia(page = galleryPage, { scrollToTop = false } = {}) {
   galleryLoading = true;
   setTextIfPresent("result-count", `Loading page ${galleryPage}`);
   showIfPresent("empty-state", false);
+  renderGallerySkeleton();
   updateGalleryPagination();
   const params = new URLSearchParams();
   if ($("kind-filter").value) params.set("media_kind", $("kind-filter").value);
   if ($("category-filter").value) params.set("category_id", $("category-filter").value);
   if ($("search").value.trim()) params.set("q", $("search").value.trim());
+  if (safeEl("uploader-filter")?.value.trim()) params.set("uploader", $("uploader-filter").value.trim());
+  if (mbToBytes(safeEl("min-size-filter")?.value)) params.set("min_size", String(mbToBytes($("min-size-filter").value)));
+  if (mbToBytes(safeEl("max-size-filter")?.value)) params.set("max_size", String(mbToBytes($("max-size-filter").value)));
+  if (safeEl("date-from-filter")?.value) params.set("date_from", $("date-from-filter").value);
+  if (safeEl("date-to-filter")?.value) params.set("date_to", $("date-to-filter").value);
+  if (safeEl("adult-filter")?.value && $("adult-filter").value !== "show") params.set("adult", $("adult-filter").value);
   params.set("sort", $("sort-filter").value);
   params.set("limit", GALLERY_PAGE_SIZE + 1);
   params.set("offset", (galleryPage - 1) * GALLERY_PAGE_SIZE);
@@ -881,9 +1111,271 @@ function focusGalleryOnNewestUploads() {
   renderActiveFilters();
 }
 
+function galleryItemById(id) {
+  const numericId = Number(id);
+  return mediaItems.find((entry) => Number(entry.id) === numericId)
+    || (activeDetail && Number(activeDetail.id) === numericId ? activeDetail : null);
+}
+
+function updateCompareUi() {
+  const tray = safeEl("compare-tray");
+  const count = compareSelection.size;
+  showIfPresent("compare-tray", count > 0);
+  setTextIfPresent("compare-count", `${count} selected`);
+  setDisabledIfPresent("compare-open", count < 2);
+  setDisabledIfPresent("compare-tray-open", count < 2);
+  setDisabledIfPresent("selection-slideshow", count < 1);
+  setDisabledIfPresent("selection-like", count < 1);
+  setDisabledIfPresent("selection-save", count < 1);
+  setDisabledIfPresent("selection-collect", count < 1);
+  if (tray) tray.title = count < 2 ? "Select at least two posts to compare." : "Open compare board.";
+  document.querySelectorAll("[data-compare]").forEach((button) => {
+    const selected = compareSelection.has(Number(button.dataset.compare));
+    button.textContent = selected ? "Selected" : "Compare";
+    button.setAttribute("aria-pressed", selected ? "true" : "false");
+    button.closest(".media-card")?.classList.toggle("is-compared", selected);
+  });
+}
+
+function toggleCompareSelection(id) {
+  const numericId = Number(id);
+  if (!numericId) return;
+  if (compareSelection.has(numericId)) {
+    compareSelection.delete(numericId);
+  } else {
+    compareSelection.add(numericId);
+  }
+  updateCompareUi();
+}
+
+function clearCompareSelection() {
+  compareSelection.clear();
+  updateCompareUi();
+}
+
+function compareItems() {
+  return Array.from(compareSelection).map(galleryItemById).filter(Boolean);
+}
+
+function selectCurrentPage() {
+  mediaItems.forEach((item) => {
+    compareSelection.add(Number(item.id));
+  });
+  updateCompareUi();
+  showToast(`${compareSelection.size} post${compareSelection.size === 1 ? "" : "s"} selected.`, "success");
+}
+
+function updateMediaItem(updated) {
+  if (!updated?.id) return;
+  mediaItems = mediaItems.map((entry) => Number(entry.id) === Number(updated.id) ? updated : entry);
+  if (activeDetail && Number(activeDetail.id) === Number(updated.id)) activeDetail = updated;
+}
+
+async function bulkToggleSelection(endpoint, payloadKey, nextValue, successMessage) {
+  if (!currentUser) return $("auth-dialog").showModal();
+  const items = compareItems();
+  if (!items.length) return;
+  for (const item of items) {
+    const data = await apiFetch(`/api/media/${item.id}/${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [payloadKey]: nextValue }),
+    });
+    updateMediaItem(data.media);
+  }
+  renderMediaGrid();
+  showToast(successMessage, "success");
+}
+
+function openSelectedCollectionPicker() {
+  const ids = compareItems().map((item) => item.id);
+  if (!ids.length) return;
+  openCollectionPicker(ids);
+}
+
+function renderCompareBoard() {
+  const grid = safeEl("compare-grid");
+  if (!grid) return;
+  const allItems = compareItems();
+  const items = allItems.slice(0, COMPARE_SELECTION_LIMIT);
+  grid.innerHTML = items.length ? items.map((item) => `
+    <article class="compare-card">
+      <button class="mini-media" type="button" data-open="${item.id}">
+        ${renderPreview(item, "mini")}
+      </button>
+      <h3>${adultBadge(item)}${escapeHtml(item.title)}</h3>
+      <dl>
+        <div><dt>Creator</dt><dd>${escapeHtml(item.display_name || item.username || "Unknown")}</dd></div>
+        <div><dt>Category</dt><dd>${escapeHtml(item.category_name || "Unsorted")}</dd></div>
+        <div><dt>Type</dt><dd>${escapeHtml(item.media_kind || "media")}</dd></div>
+        <div><dt>Size</dt><dd>${formatBytes(item.file_size)}</dd></div>
+        <div><dt>Likes</dt><dd>${Number(item.like_count || 0)}</dd></div>
+        <div><dt>Downloads</dt><dd>${Number(item.downloads || 0)}</dd></div>
+      </dl>
+      <div class="tag-row">${(item.tags || []).slice(0, 8).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>
+      <div class="card-actions">
+        <button type="button" data-open="${item.id}">Open</button>
+        <button type="button" data-compare-remove="${item.id}">Remove</button>
+      </div>
+    </article>
+  `).join("") + (allItems.length > COMPARE_SELECTION_LIMIT ? `<p class="muted">Showing the first ${COMPARE_SELECTION_LIMIT} selected posts in compare mode.</p>` : "") : `<p class="muted">Select posts from the gallery to compare them here.</p>`;
+}
+
+function openCompareBoard() {
+  if (compareSelection.size < 2) {
+    showToast("Select at least two posts to compare.", "error");
+    return;
+  }
+  renderCompareBoard();
+  safeEl("compare-dialog")?.showModal();
+}
+
+function topCounts(items, getter, limit = 5) {
+  const counts = new Map();
+  items.forEach((item) => {
+    const values = getter(item);
+    (Array.isArray(values) ? values : [values]).filter(Boolean).forEach((value) => {
+      const label = String(value);
+      counts.set(label, (counts.get(label) || 0) + 1);
+    });
+  });
+  return Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, limit)
+    .map(([label, count]) => ({ label, count }));
+}
+
+function renderInsightBars(items) {
+  const max = Math.max(1, ...items.map((item) => item.count));
+  return items.length ? items.map((item) => `
+    <div class="insight-bar">
+      <span>${escapeHtml(item.label)}</span>
+      <meter min="0" max="${max}" value="${item.count}"></meter>
+      <strong>${item.count}</strong>
+    </div>
+  `).join("") : `<p class="muted">Nothing to chart on this page.</p>`;
+}
+
+function openInsights() {
+  const view = safeEl("insights-view");
+  if (!view) return;
+  const items = mediaItems;
+  const totals = items.reduce((acc, item) => {
+    acc.likes += Number(item.like_count || 0);
+    acc.downloads += Number(item.downloads || 0);
+    acc.views += Number(item.views || 0);
+    acc.bytes += Number(item.file_size || 0);
+    acc.videos += item.media_kind === "video" ? 1 : 0;
+    acc.adult += item.is_adult ? 1 : 0;
+    return acc;
+  }, { likes: 0, downloads: 0, views: 0, bytes: 0, videos: 0, adult: 0 });
+  const images = Math.max(0, items.length - totals.videos);
+  view.innerHTML = `
+    <section class="insight-summary">
+      <div><strong>${items.length}</strong><span>On page</span></div>
+      <div><strong>${images}</strong><span>Images/GIFs</span></div>
+      <div><strong>${totals.videos}</strong><span>Videos</span></div>
+      <div><strong>${formatBytes(totals.bytes)}</strong><span>Loaded size</span></div>
+      <div><strong>${totals.likes}</strong><span>Likes</span></div>
+      <div><strong>${totals.downloads}</strong><span>Downloads</span></div>
+    </section>
+    <section class="insight-grid">
+      <article>
+        <h3>Top Tags</h3>
+        ${renderInsightBars(topCounts(items, (item) => item.tags || []))}
+      </article>
+      <article>
+        <h3>Top Categories</h3>
+        ${renderInsightBars(topCounts(items, (item) => item.category_name))}
+      </article>
+      <article>
+        <h3>Top Creators</h3>
+        ${renderInsightBars(topCounts(items, (item) => item.display_name || item.username))}
+      </article>
+      <article>
+        <h3>Safety Mix</h3>
+        ${renderInsightBars([{ label: "Standard", count: items.length - totals.adult }, { label: "18+", count: totals.adult }])}
+      </article>
+    </section>
+  `;
+  safeEl("insights-dialog")?.showModal();
+}
+
+function currentSlideshowItems() {
+  return (slideshowItemsOverride || mediaItems).filter((item) => item?.url && canRevealAdult(item));
+}
+
+function stopSlideshow() {
+  clearInterval(slideshowTimer);
+  slideshowTimer = 0;
+  slideshowPlaying = false;
+  setTextIfPresent("slideshow-play", "Play");
+}
+
+function closeSlideshow() {
+  stopSlideshow();
+  slideshowItemsOverride = null;
+  safeEl("slideshow-dialog")?.close();
+}
+
+function renderSlideshowSlide() {
+  const items = currentSlideshowItems();
+  const stage = safeEl("slideshow-stage");
+  if (!stage) return;
+  if (!items.length) {
+    stage.innerHTML = `<div class="empty-state"><h2>No playable posts</h2><p>Use the current page with visible images or videos, or verify age for 18+ posts.</p></div>`;
+    setTextIfPresent("slideshow-title", "Slideshow");
+    setTextIfPresent("slideshow-meta", "");
+    stopSlideshow();
+    return;
+  }
+  slideshowIndex = Math.max(0, Math.min(slideshowIndex, items.length - 1));
+  const item = items[slideshowIndex];
+  stage.innerHTML = item.media_kind === "video"
+    ? `<video src="${item.url}" controls autoplay playsinline ${userSettings().muted_previews ? "muted" : ""}></video>`
+    : `<img src="${item.url}" alt="${escapeHtml(item.title)}" />`;
+  setTextIfPresent("slideshow-title", item.title || "Slideshow");
+  setTextIfPresent("slideshow-meta", `${slideshowIndex + 1} of ${items.length} · ${item.category_name || "Media"} · ${formatBytes(item.file_size)}`);
+}
+
+function moveSlideshow(direction) {
+  const items = currentSlideshowItems();
+  if (!items.length) return;
+  slideshowIndex = (slideshowIndex + direction + items.length) % items.length;
+  renderSlideshowSlide();
+}
+
+function startSlideshow() {
+  const delay = Number(safeEl("slideshow-delay")?.value || 4000);
+  stopSlideshow();
+  slideshowPlaying = true;
+  setTextIfPresent("slideshow-play", "Pause");
+  slideshowTimer = setInterval(() => moveSlideshow(1), Math.max(1200, delay));
+}
+
+function toggleSlideshowPlay() {
+  if (slideshowPlaying) stopSlideshow();
+  else startSlideshow();
+}
+
+function openSlideshow(sourceItems = null) {
+  slideshowItemsOverride = Array.isArray(sourceItems) ? sourceItems : null;
+  const items = currentSlideshowItems();
+  if (!items.length) {
+    slideshowItemsOverride = null;
+    showToast("No visible media on this page for slideshow.", "error");
+    return;
+  }
+  slideshowIndex = 0;
+  renderSlideshowSlide();
+  safeEl("slideshow-dialog")?.showModal();
+}
+
 function renderMediaGrid() {
   const grid = $("gallery-grid");
   grid.innerHTML = "";
+  const visibleIds = new Set(mediaItems.map((item) => Number(item.id)));
+  compareSelection = new Set(Array.from(compareSelection).filter((id) => visibleIds.has(Number(id))));
   const start = mediaItems.length ? ((galleryPage - 1) * GALLERY_PAGE_SIZE) + 1 : 0;
   const end = start + mediaItems.length - 1;
   $("result-count").textContent = mediaItems.length
@@ -912,7 +1404,8 @@ function renderMediaGrid() {
   updateGalleryPagination();
   for (const item of mediaItems) {
     const card = document.createElement("article");
-    card.className = `media-card${item.is_adult ? " adult-card" : ""}`;
+    const selectedForCompare = compareSelection.has(Number(item.id));
+    card.className = `media-card${item.is_adult ? " adult-card" : ""}${selectedForCompare ? " is-compared" : ""}`;
     const prefs = userSettings();
     card.innerHTML = `
       <button class="media-preview" type="button" data-open="${item.id}">${renderPreview(item)}</button>
@@ -930,6 +1423,7 @@ function renderMediaGrid() {
           <span>${formatBytes(item.file_size)}</span>
         </div>
         <div class="card-actions">
+          <button type="button" data-compare="${item.id}" aria-pressed="${selectedForCompare ? "true" : "false"}">${selectedForCompare ? "Selected" : "Compare"}</button>
           <button type="button" data-like="${item.id}">${item.liked_by_me ? "Unlike" : "Like"}</button>
           <button type="button" data-bookmark="${item.id}">${item.bookmarked_by_me ? "Saved" : "Save"}</button>
           <button type="button" data-collect="${item.id}">Collect</button>
@@ -941,6 +1435,7 @@ function renderMediaGrid() {
     `;
     grid.appendChild(card);
   }
+  updateCompareUi();
 }
 
 async function loadCurrentGalleryPage(page = galleryPage, options = {}) {
@@ -967,7 +1462,9 @@ async function openDetail(id) {
   $("detail-media").innerHTML = item.media_kind === "video"
     ? `<video src="${item.url}" controls autoplay playsinline></video>`
     : `<img src="${item.url}" alt="${escapeHtml(item.title)}" />`;
+  resetDetailTransform();
   $("detail-meta").textContent = `${item.category_name} by ${item.display_name || item.username} - ${formatBytes(item.file_size)} - ${item.like_count || 0} likes`;
+  renderDetailInspector(item);
   $("detail-description").innerHTML = `
     ${item.user_avatar_url ? `<div class="profile-mini"><button type="button" class="avatar" data-profile="${escapeHtml(item.username || "")}"><img src="${item.user_avatar_url}" alt=""></button><div><button type="button" class="text-button strong" data-profile="${escapeHtml(item.username || "")}">${escapeHtml(item.display_name || item.username)}</button>${item.user_bio ? `<p>${escapeHtml(item.user_bio)}</p>` : ""}${item.user_website_url ? `<a href="${item.user_website_url}" target="_blank" rel="noopener">Website</a>` : ""}</div></div>` : ""}
     <p>${escapeHtml(item.description || "")}</p>
@@ -1143,7 +1640,7 @@ async function openCollection(id) {
 
 async function openCollectionPicker(mediaId) {
   if (!currentUser) return $("auth-dialog").showModal();
-  selectedCollectionMediaId = mediaId;
+  selectedCollectionMediaId = Array.isArray(mediaId) ? mediaId.map(Number).filter(Boolean) : Number(mediaId);
   setNotice("collection-picker-error", "");
   const collections = await loadCollections(true);
   $("collection-picker-select").innerHTML = collections.map((collection) => (
@@ -1161,13 +1658,16 @@ async function addToCollection(event) {
   const collectionId = $("collection-picker-select").value;
   if (!collectionId) return setNotice("collection-picker-error", "Choose a collection first.");
   try {
-    await apiFetch(`/api/collections/${collectionId}/items`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ media_id: Number(selectedCollectionMediaId), saved: true }),
-    });
+    const ids = Array.isArray(selectedCollectionMediaId) ? selectedCollectionMediaId : [selectedCollectionMediaId];
+    for (const mediaId of ids) {
+      await apiFetch(`/api/collections/${collectionId}/items`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ media_id: Number(mediaId), saved: true }),
+      });
+    }
     $("collection-picker-dialog").close();
-    showToast("Added to collection.", "success");
+    showToast(ids.length > 1 ? "Selected posts added to collection." : "Added to collection.", "success");
   } catch (err) {
     setNotice("collection-picker-error", err.message);
   }
@@ -1263,6 +1763,7 @@ async function loadPagedFeed(path, mode, page = 1, { scrollToTop = false } = {})
   galleryLoading = true;
   setTextIfPresent("result-count", `Loading page ${galleryPage}`);
   showIfPresent("empty-state", false);
+  renderGallerySkeleton();
   updateGalleryPagination();
   const params = new URLSearchParams({
     limit: String(GALLERY_PAGE_SIZE + 1),
@@ -1578,7 +2079,8 @@ function closeUploadDialog() {
   setNotice("upload-error", "");
   const form = safeEl("upload-form");
   if (form) form.reset();
-  setTextIfPresent("file-label", "Choose image, GIF, or video under 500MB");
+  setTextIfPresent("file-label", "Choose images, GIFs, or videos under 500MB each");
+  renderUploadQueue();
   resetUploadProgress();
   const dialog = safeEl("upload-dialog");
   if (dialog?.open) dialog.close();
@@ -1622,12 +2124,32 @@ function titleFromFilename(filename) {
 }
 
 function updateUploadFileSummary() {
-  const file = safeEl("upload-file")?.files?.[0];
-  setTextIfPresent("file-label", file ? `${file.name} - ${formatBytes(file.size)}` : "Choose image, GIF, or video under 500MB");
-  setTextIfPresent("upload-file-summary", file ? `${file.type || "Unknown type"} · ${formatBytes(file.size)} · ${file.name}` : "No file selected.");
+  const files = Array.from(safeEl("upload-file")?.files || []);
+  const file = files[0];
+  const totalBytes = files.reduce((sum, entry) => sum + Number(entry.size || 0), 0);
+  setTextIfPresent("file-label", files.length ? `${files.length} file${files.length === 1 ? "" : "s"} selected - ${formatBytes(totalBytes)}` : "Choose images, GIFs, or videos under 500MB each");
+  setTextIfPresent("upload-file-summary", files.length ? `${files.length} queued · ${formatBytes(totalBytes)} total` : "No file selected.");
   const title = safeEl("upload-title");
   if (file && title && !title.value.trim()) title.value = titleFromFilename(file.name);
+  renderUploadQueue();
   checkUploadReadiness();
+}
+
+function renderUploadQueue(activeIndex = -1, statuses = []) {
+  const queue = safeEl("upload-queue");
+  if (!queue) return;
+  const files = Array.from(safeEl("upload-file")?.files || []);
+  queue.hidden = files.length === 0;
+  queue.innerHTML = files.map((file, index) => {
+    const status = statuses[index] || (index === activeIndex ? "Uploading" : "Queued");
+    return `
+      <div class="upload-queue-item${index === activeIndex ? " is-active" : ""}">
+        <strong>${escapeHtml(titleFromFilename(file.name))}</strong>
+        <span>${escapeHtml(file.type || "Unknown type")} · ${formatBytes(file.size)}</span>
+        <em>${escapeHtml(status)}</em>
+      </div>
+    `;
+  }).join("");
 }
 
 function openSettingsPanel() {
@@ -1652,25 +2174,29 @@ async function submitUpload(event) {
     return;
   }
   setNotice("upload-error", "");
-  const file = $("upload-file").files[0];
-  if (!file) return setNotice("upload-error", "Choose a file first.");
-  if (file.size > MAX_UPLOAD_BYTES) return setNotice("upload-error", "Uploads must be 500MB or smaller.");
-  const body = new FormData();
-  body.set("file", file);
-  body.set("title", $("upload-title").value);
-  body.set("description", $("upload-description").value);
-  body.set("tags", $("upload-tags").value);
-  body.set("is_adult", $("upload-adult").checked ? "true" : "false");
-  if ($("upload-visibility")) body.set("visibility", $("upload-visibility").value || "public");
-  if ($("upload-comments-enabled")) body.set("comments_enabled", $("upload-comments-enabled").checked ? "true" : "false");
-  if ($("upload-downloads-enabled")) body.set("downloads_enabled", $("upload-downloads-enabled").checked ? "true" : "false");
-  if ($("upload-pinned")) body.set("pinned", $("upload-pinned").checked ? "true" : "false");
-  if ($("upload-category").value) {
-    body.set("category_id", $("upload-category").value);
-  } else {
-    body.set("category_name", $("new-category-name").value);
-    body.set("category_kind", $("new-category-kind").value);
-  }
+  const files = Array.from($("upload-file").files || []);
+  if (!files.length) return setNotice("upload-error", "Choose a file first.");
+  const oversized = files.find((file) => file.size > MAX_UPLOAD_BYTES);
+  if (oversized) return setNotice("upload-error", `${oversized.name} is over 500MB.`);
+  const buildBody = (file, index) => {
+    const body = new FormData();
+    body.set("file", file);
+    body.set("title", files.length === 1 ? $("upload-title").value : titleFromFilename(file.name));
+    body.set("description", $("upload-description").value);
+    body.set("tags", $("upload-tags").value);
+    body.set("is_adult", $("upload-adult").checked ? "true" : "false");
+    if ($("upload-visibility")) body.set("visibility", $("upload-visibility").value || "public");
+    if ($("upload-comments-enabled")) body.set("comments_enabled", $("upload-comments-enabled").checked ? "true" : "false");
+    if ($("upload-downloads-enabled")) body.set("downloads_enabled", $("upload-downloads-enabled").checked ? "true" : "false");
+    if ($("upload-pinned")) body.set("pinned", index === 0 && $("upload-pinned").checked ? "true" : "false");
+    if ($("upload-category").value) {
+      body.set("category_id", $("upload-category").value);
+    } else {
+      body.set("category_name", $("new-category-name").value);
+      body.set("category_kind", $("new-category-kind").value);
+    }
+    return body;
+  };
   try {
     uploadInFlight = true;
     uploadStartedAt = Date.now();
@@ -1680,27 +2206,37 @@ async function submitUpload(event) {
       submit.classList.add("is-uploading");
       submit.textContent = "Uploading...";
     }
-    setUploadProgress(0, "Starting upload");
-    const uploaded = await apiUpload("/api/media", body, ({ loaded, total, percent, phase }) => {
-      const seconds = Math.max(1, Math.round((Date.now() - uploadStartedAt) / 1000));
-      if (phase === "processing") {
-        setUploadProgress(100, "Upload received. Saving media chunks on the server...", { processing: true });
-        return;
-      }
-      if (total) {
-        setUploadProgress(percent, `${formatBytes(loaded)} of ${formatBytes(total)} uploaded in ${seconds}s`);
-      } else {
-        setUploadProgress(percent || 12, `${formatBytes(loaded)} uploaded. Measuring transfer...`, { processing: true });
-      }
-    });
+    const statuses = files.map(() => "Queued");
+    const uploadedIds = [];
+    for (const [index, file] of files.entries()) {
+      statuses[index] = "Uploading";
+      renderUploadQueue(index, statuses);
+      setUploadProgress(Math.round((index / files.length) * 100), `Uploading ${index + 1} of ${files.length}: ${file.name}`);
+      const uploaded = await apiUpload("/api/media", buildBody(file, index), ({ loaded, total, percent, phase }) => {
+        const seconds = Math.max(1, Math.round((Date.now() - uploadStartedAt) / 1000));
+        const overall = ((index + ((percent || 0) / 100)) / files.length) * 100;
+        if (phase === "processing") {
+          setUploadProgress(overall, `Saving ${index + 1} of ${files.length} on the server...`, { processing: true });
+          return;
+        }
+        if (total) {
+          setUploadProgress(overall, `${file.name}: ${formatBytes(loaded)} of ${formatBytes(total)} uploaded in ${seconds}s`);
+        } else {
+          setUploadProgress(overall || 12, `${file.name}: ${formatBytes(loaded)} uploaded. Measuring transfer...`, { processing: true });
+        }
+      });
+      statuses[index] = "Saved";
+      uploadedIds.push(uploaded?.media?.id);
+      renderUploadQueue(index, statuses);
+    }
     setUploadProgress(100, "Saved. Refreshing gallery");
     uploadInFlight = false;
     closeUploadDialog();
     focusGalleryOnNewestUploads();
     await refreshAll();
-    const uploadedId = uploaded?.media?.id;
-    if (uploadedId && confirm("Upload saved. Open it now?")) await openDetail(uploadedId);
-    else showToast("Upload saved.", "success");
+    const firstUploadedId = uploadedIds.find(Boolean);
+    if (files.length === 1 && firstUploadedId && confirm("Upload saved. Open it now?")) await openDetail(firstUploadedId);
+    else showToast(`${files.length} upload${files.length === 1 ? "" : "s"} saved.`, "success");
   } catch (err) {
     setNotice("upload-error", err.message);
     showToast(err.message || "Upload failed.", "error");
@@ -1806,14 +2342,15 @@ function startSilentChecks() {
 }
 
 function checkUploadReadiness() {
-  const file = safeEl("upload-file")?.files?.[0];
+  const files = Array.from(safeEl("upload-file")?.files || []);
   const title = safeEl("upload-title")?.value?.trim();
   let message = "";
-  if (file) {
-    const allowed = /^(image|video)\//.test(file.type || "") || /\.(jpe?g|png|webp|gif|mp4|webm|mov|m4v|ogg)$/i.test(file.name || "");
-    if (!allowed) message = "This file type may be rejected. Use an image, GIF, or video.";
-    else if (file.size > MAX_UPLOAD_BYTES) message = "This file is over 500MB and will be rejected.";
-    else if (!title) message = "Add a title before uploading.";
+  if (files.length) {
+    const invalid = files.find((file) => !(/^(image|video)\//.test(file.type || "") || /\.(jpe?g|png|webp|gif|mp4|webm|mov|m4v|ogg)$/i.test(file.name || "")));
+    const oversized = files.find((file) => file.size > MAX_UPLOAD_BYTES);
+    if (invalid) message = `${invalid.name} may be rejected. Use an image, GIF, or video.`;
+    else if (oversized) message = `${oversized.name} is over 500MB and will be rejected.`;
+    else if (!title && files.length === 1) message = "Add a title before uploading.";
   }
   setNotice("upload-error", message);
   setDisabledIfPresent("upload-submit", Boolean(message) || uploadInFlight);
@@ -1826,6 +2363,8 @@ function showKeyboardShortcuts() {
     "U - upload",
     "R - refresh current view",
     "S - share current view",
+    "C - open compare board when posts are selected",
+    "L - open slideshow for the current page",
     "Arrow Left/Right - previous/next media or page",
     "Escape - close the open dialog",
   ].join("\n"));
@@ -1836,6 +2375,7 @@ function closeTopDialog() {
   const dialog = dialogs.at(-1);
   if (!dialog) return false;
   if (dialog.id === "detail-dialog") closeDetailDialog();
+  else if (dialog.id === "slideshow-dialog") closeSlideshow();
   else dialog.close();
   return true;
 }
@@ -1859,11 +2399,19 @@ function bindKeyboardShortcuts() {
     } else if (event.key.toLowerCase() === "s") {
       event.preventDefault();
       await shareCurrentView();
+    } else if (event.key.toLowerCase() === "c") {
+      event.preventDefault();
+      openCompareBoard();
+    } else if (event.key.toLowerCase() === "l") {
+      event.preventDefault();
+      openSlideshow();
     } else if (event.key === "ArrowLeft") {
-      if (safeEl("detail-dialog")?.open) await openAdjacentDetail(-1);
+      if (safeEl("slideshow-dialog")?.open) moveSlideshow(-1);
+      else if (safeEl("detail-dialog")?.open) await openAdjacentDetail(-1);
       else if (galleryPage > 1) await loadCurrentGalleryPage(galleryPage - 1, { scrollToTop: true });
     } else if (event.key === "ArrowRight") {
-      if (safeEl("detail-dialog")?.open) await openAdjacentDetail(1);
+      if (safeEl("slideshow-dialog")?.open) moveSlideshow(1);
+      else if (safeEl("detail-dialog")?.open) await openAdjacentDetail(1);
       else if (galleryHasNext) await loadCurrentGalleryPage(galleryPage + 1, { scrollToTop: true });
     }
   });
@@ -1904,6 +2452,55 @@ function bindEvents() {
   $("settings-email-save").addEventListener("click", saveEmailAndSendCode);
   $("settings-email-verify").addEventListener("click", verifyEmailCode);
   $("surprise-open").addEventListener("click", openSurprise);
+  on("slideshow-open", "click", openSlideshow);
+  on("slideshow-close", "click", closeSlideshow);
+  on("slideshow-prev", "click", () => moveSlideshow(-1));
+  on("slideshow-next", "click", () => moveSlideshow(1));
+  on("slideshow-play", "click", toggleSlideshowPlay);
+  on("slideshow-delay", "input", () => {
+    if (slideshowPlaying) startSlideshow();
+  });
+  on("slideshow-dialog", "close", () => {
+    stopSlideshow();
+    slideshowItemsOverride = null;
+  });
+  on("compare-open", "click", openCompareBoard);
+  on("compare-tray-open", "click", openCompareBoard);
+  on("compare-clear", "click", clearCompareSelection);
+  on("select-page", "click", selectCurrentPage);
+  on("selection-slideshow", "click", () => openSlideshow(compareItems()));
+  on("selection-like", "click", () => bulkToggleSelection("like", "liked", true, "Selected posts liked."));
+  on("selection-save", "click", () => bulkToggleSelection("bookmark", "bookmarked", true, "Selected posts saved."));
+  on("selection-collect", "click", openSelectedCollectionPicker);
+  on("compare-close", "click", () => safeEl("compare-dialog")?.close());
+  on("save-view", "click", saveCurrentView);
+  on("saved-views-open", "click", openSavedViewsDialog);
+  on("saved-views-close", "click", () => safeEl("saved-views-dialog")?.close());
+  on("saved-view-form", "submit", saveCurrentView);
+  on("insights-open", "click", openInsights);
+  on("insights-close", "click", () => safeEl("insights-dialog")?.close());
+  on("detail-zoom-in", "click", () => zoomDetail(0.2));
+  on("detail-zoom-out", "click", () => zoomDetail(-0.2));
+  on("detail-rotate", "click", rotateDetail);
+  on("detail-fit", "click", resetDetailTransform);
+  on("detail-media", "click", () => {
+    detailZoom = detailZoom > 1 ? 1 : 1.8;
+    applyDetailTransform();
+  });
+  on("saved-views-list", "click", async (event) => {
+    const apply = event.target.closest("[data-apply-saved-view]");
+    const share = event.target.closest("[data-share-saved-view]");
+    const del = event.target.closest("[data-delete-saved-view]");
+    if (apply) {
+      const view = readSavedViews().find((item) => item.id === apply.dataset.applySavedView);
+      if (view) {
+        safeEl("saved-views-dialog")?.close();
+        applyGalleryState(view.state);
+      }
+    }
+    if (share) await shareSavedView(share.dataset.shareSavedView);
+    if (del) deleteSavedView(del.dataset.deleteSavedView);
+  });
   on("share-view", "click", shareCurrentView);
   on("shortcuts-open", "click", showKeyboardShortcuts);
   on("users-open", "click", openUserSearchDialog);
@@ -1992,10 +2589,21 @@ function bindEvents() {
     if (key === "search") $("search").value = "";
     if (key === "kind") $("kind-filter").value = "";
     if (key === "category") $("category-filter").value = "";
+    if (key === "uploader") $("uploader-filter").value = "";
+    if (key === "minSize") $("min-size-filter").value = "";
+    if (key === "maxSize") $("max-size-filter").value = "";
+    if (key === "dateFrom") $("date-from-filter").value = "";
+    if (key === "dateTo") $("date-to-filter").value = "";
+    if (key === "adult") $("adult-filter").value = "show";
     if (key === "sort") $("sort-filter").value = "new";
     loadMedia(1);
   });
-  ["kind-filter", "category-filter", "sort-filter"].forEach((id) => $(id).addEventListener("input", () => loadMedia(1)));
+  ["kind-filter", "category-filter", "sort-filter", "adult-filter", "date-from-filter", "date-to-filter"].forEach((id) => $(id).addEventListener("input", () => loadMedia(1)));
+  ["uploader-filter", "min-size-filter", "max-size-filter"].forEach((id) => $(id).addEventListener("input", () => {
+    clearTimeout(window.__advancedFilterTimer);
+    renderActiveFilters();
+    window.__advancedFilterTimer = setTimeout(() => loadMedia(1), SEARCH_DEBOUNCE_MS);
+  }));
   $("search").addEventListener("input", () => {
     clearTimeout(window.__gallerySearchTimer);
     renderActiveFilters();
@@ -2004,6 +2612,7 @@ function bindEvents() {
   $("gallery-grid").addEventListener("click", async (event) => {
     const open = event.target.closest("[data-open]");
     const profile = event.target.closest("[data-profile]");
+    const compare = event.target.closest("[data-compare]");
     const like = event.target.closest("[data-like]");
     const bookmark = event.target.closest("[data-bookmark]");
     const collect = event.target.closest("[data-collect]");
@@ -2013,6 +2622,7 @@ function bindEvents() {
     const download = event.target.closest("[data-download]");
     const del = event.target.closest("[data-delete-media]");
     if (profile) return openProfile(profile.dataset.profile);
+    if (compare) return toggleCompareSelection(compare.dataset.compare);
     if (open && !handleAdultOpen(open.dataset.open)) await openDetail(open.dataset.open);
     if (manage) await editOwnMedia(manage.dataset.editMedia);
     if (del) await deleteOwnMedia(del.dataset.deleteMedia);
@@ -2071,6 +2681,16 @@ function bindEvents() {
     const open = event.target.closest("[data-open]");
     if (open && !handleAdultOpen(open.dataset.open)) await openDetail(open.dataset.open);
   });
+  $("compare-grid").addEventListener("click", async (event) => {
+    const open = event.target.closest("[data-open]");
+    const remove = event.target.closest("[data-compare-remove]");
+    if (remove) {
+      compareSelection.delete(Number(remove.dataset.compareRemove));
+      updateCompareUi();
+      renderCompareBoard();
+    }
+    if (open && !handleAdultOpen(open.dataset.open)) await openDetail(open.dataset.open);
+  });
   $("studio-list").addEventListener("click", async (event) => {
     const open = event.target.closest("[data-open]");
     const edit = event.target.closest("[data-edit-media]");
@@ -2122,6 +2742,7 @@ function bindEvents() {
 async function boot() {
   bindEvents();
   renderAuth();
+  updateCompareUi();
   startSilentChecks();
   const hasBackendConfig = await initApiOrigin();
   if (REMOTE_MODE && !hasBackendConfig) return;
