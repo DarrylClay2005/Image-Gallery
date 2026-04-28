@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import mimetypes
 import html
 import os
@@ -26,6 +28,7 @@ from .emailer import EmailDeliveryError, send_verification_email
 
 settings = load_settings()
 db = GalleryDatabase(settings)
+logger = logging.getLogger("image_gallery")
 IMAGE_MIME_PREFIXES = ("image/",)
 VIDEO_MIME_PREFIXES = ("video/",)
 SAFE_EXTENSIONS = {
@@ -62,6 +65,10 @@ class AccountDeleteRequest(BaseModel):
 
 class FollowRequest(BaseModel):
     following: bool = True
+
+
+class FriendActionRequest(BaseModel):
+    action: str
 
 
 class EmailUpdateRequest(BaseModel):
@@ -110,9 +117,14 @@ class ProfileUpdateRequest(BaseModel):
     bio: str | None = None
     website_url: str | None = None
     location_label: str | None = None
+    profile_headline: str | None = None
+    featured_tags: list[str] = []
     profile_color: str = "#37c9a7"
     public_profile: bool = True
     show_liked_count: bool = True
+    show_collections: bool = True
+    show_recent_uploads: bool = True
+    show_friends: bool = True
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -126,6 +138,10 @@ class SettingsUpdateRequest(BaseModel):
     reduce_motion: bool | None = None
     open_original_in_new_tab: bool | None = None
     blur_video_previews: bool | None = None
+    profile_show_uploads: bool | None = None
+    profile_show_collections: bool | None = None
+    profile_show_friends: bool | None = None
+    profile_show_follow_counts: bool | None = None
 
 
 class AgeVerifyRequest(BaseModel):
@@ -325,6 +341,13 @@ def _with_user_urls(request: Request, user: dict[str, Any] | None) -> dict[str, 
     return _jsonable(clone)
 
 
+def _with_friend_request_urls(request: Request, item: dict[str, Any]) -> dict[str, Any]:
+    clone = dict(item)
+    if clone.get("user"):
+        clone["user"] = _with_user_urls(request, clone["user"])
+    return _jsonable(clone)
+
+
 def _with_collection_urls(request: Request, collection: dict[str, Any] | None, adult_allowed: bool = False) -> dict[str, Any] | None:
     if not collection:
         return None
@@ -461,8 +484,32 @@ async def _read_validated_upload(upload: UploadFile, max_bytes: int, *, image_on
 async def lifespan(app: FastAPI):
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     await db.connect()
+    migration_task = asyncio.create_task(_auto_migrate_legacy_uploads())
     yield
+    migration_task.cancel()
+    try:
+        await migration_task
+    except asyncio.CancelledError:
+        pass
     await db.close()
+
+
+async def _auto_migrate_legacy_uploads() -> None:
+    """Move old files from uploads/ into the DB store in small background batches."""
+    await asyncio.sleep(2)
+    while True:
+        try:
+            result = await db.migrate_legacy_media_files(limit=10)
+            if result.get("migrated"):
+                logger.info("Auto-migrated %s legacy upload(s) into DB storage.", result["migrated"])
+                await asyncio.sleep(1)
+                continue
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Auto migration from uploads/ paused: %s", exc)
+            return
 
 
 app = FastAPI(title="Image Gallery", lifespan=lifespan)
@@ -767,6 +814,13 @@ async def delete_account(payload: AccountDeleteRequest, request: Request) -> dic
     return {"deleted": True}
 
 
+@app.get("/api/users/search")
+async def search_users(request: Request, q: str = "", limit: int = 30) -> dict[str, Any]:
+    viewer_id = _user_id(_auth_optional(request))
+    users = await db.search_users(q, viewer_id=viewer_id, limit=limit)
+    return {"users": [_with_user_urls(request, user) for user in users]}
+
+
 @app.get("/api/users/{username}")
 async def public_profile(username: str, request: Request) -> dict[str, Any]:
     viewer_id = _user_id(_auth_optional(request))
@@ -774,6 +828,28 @@ async def public_profile(username: str, request: Request) -> dict[str, Any]:
     if not profile:
         raise HTTPException(status_code=404, detail="User not found.")
     return {"user": _with_user_urls(request, profile)}
+
+
+@app.get("/api/users/{username}/profile")
+async def profile_page(username: str, request: Request) -> dict[str, Any]:
+    viewer_id = _user_id(_auth_optional(request))
+    profile = await db.get_public_profile(username, viewer_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="User not found.")
+    adult_allowed = await _viewer_can_open_adult(request)
+    is_owner = viewer_id and int(viewer_id) == int(profile["id"])
+    show_uploads = bool(profile.get("show_recent_uploads") or is_owner)
+    show_collections = bool(profile.get("show_collections") or is_owner)
+    show_friends = bool(profile.get("show_friends") or is_owner)
+    media = await db.list_profile_media(int(profile["id"]), viewer_id=viewer_id, limit=36) if show_uploads else []
+    collections = await db.list_user_collections(int(profile["id"]), viewer_id=viewer_id, limit=12) if show_collections else []
+    friends = await db.list_friends(int(profile["id"]), viewer_id=viewer_id, limit=18) if show_friends else []
+    return {
+        "user": _with_user_urls(request, profile),
+        "media": [_with_urls(request, item, adult_allowed) for item in media],
+        "collections": [_with_collection_urls(request, row, adult_allowed) for row in collections],
+        "friends": [_with_user_urls(request, user) for user in friends],
+    }
 
 
 @app.post("/api/users/{user_id}/follow")
@@ -786,6 +862,46 @@ async def follow_user(user_id: int, payload: FollowRequest, request: Request) ->
     if not result:
         raise HTTPException(status_code=404, detail="User not found.")
     return result
+
+
+@app.post("/api/users/{user_id}/friend-request")
+async def send_friend_request(user_id: int, request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    try:
+        result = await db.send_friend_request(int(auth["id"]), user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return _jsonable(result)
+
+
+@app.get("/api/friends/requests")
+async def friend_requests(request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    incoming = await db.list_friend_requests(int(auth["id"]), mode="incoming")
+    outgoing = await db.list_friend_requests(int(auth["id"]), mode="outgoing")
+    return {
+        "incoming": [_with_friend_request_urls(request, item) for item in incoming],
+        "outgoing": [_with_friend_request_urls(request, item) for item in outgoing],
+    }
+
+
+@app.post("/api/friends/requests/{request_id}")
+async def respond_friend_request(request_id: int, payload: FriendActionRequest, request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    try:
+        result = await db.respond_friend_request(int(auth["id"]), request_id, payload.action)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    if not result:
+        raise HTTPException(status_code=404, detail="Friend request not found.")
+    return {"request": _jsonable(result)}
+
+
+@app.get("/api/me/friends")
+async def my_friends(request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    friends = await db.list_friends(int(auth["id"]), viewer_id=int(auth["id"]))
+    return {"friends": [_with_user_urls(request, user) for user in friends]}
 
 
 @app.get("/api/feed/following")
@@ -816,6 +932,13 @@ async def user_following(user_id: int, request: Request) -> dict[str, Any]:
     viewer_id = _user_id(_auth_optional(request))
     users = await db.list_user_follows(user_id, mode="following", viewer_id=viewer_id)
     return {"users": [_with_user_urls(request, user) for user in users]}
+
+
+@app.get("/api/users/{user_id}/friends")
+async def user_friends(user_id: int, request: Request) -> dict[str, Any]:
+    viewer_id = _user_id(_auth_optional(request))
+    users = await db.list_friends(user_id, viewer_id=viewer_id)
+    return {"friends": [_with_user_urls(request, user) for user in users]}
 
 @app.get("/api/categories")
 async def categories() -> dict[str, Any]:

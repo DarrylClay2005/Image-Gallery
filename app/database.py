@@ -31,6 +31,10 @@ DEFAULT_USER_SETTINGS = {
     "reduce_motion": False,
     "open_original_in_new_tab": False,
     "blur_video_previews": False,
+    "profile_show_uploads": True,
+    "profile_show_collections": True,
+    "profile_show_friends": True,
+    "profile_show_follow_counts": True,
 }
 USER_COLUMNS = (
     ("email", "VARCHAR(255) NULL"),
@@ -40,6 +44,8 @@ USER_COLUMNS = (
     ("bio", "VARCHAR(500) NULL"),
     ("website_url", "VARCHAR(300) NULL"),
     ("location_label", "VARCHAR(80) NULL"),
+    ("profile_headline", "VARCHAR(120) NULL"),
+    ("featured_tags", "JSON NULL"),
     ("profile_color", "VARCHAR(20) NOT NULL DEFAULT '#37c9a7'"),
     ("avatar_path", "VARCHAR(500) NULL"),
     ("avatar_file_id", "BIGINT UNSIGNED NULL"),
@@ -47,6 +53,9 @@ USER_COLUMNS = (
     ("avatar_original_filename", "VARCHAR(255) NULL"),
     ("public_profile", "TINYINT(1) NOT NULL DEFAULT 1"),
     ("show_liked_count", "TINYINT(1) NOT NULL DEFAULT 1"),
+    ("show_collections", "TINYINT(1) NOT NULL DEFAULT 1"),
+    ("show_recent_uploads", "TINYINT(1) NOT NULL DEFAULT 1"),
+    ("show_friends", "TINYINT(1) NOT NULL DEFAULT 1"),
     ("birthdate", "DATE NULL"),
     ("age_verified_at", "TIMESTAMP NULL DEFAULT NULL"),
     ("adult_content_consent", "TINYINT(1) NOT NULL DEFAULT 0"),
@@ -282,6 +291,24 @@ class GalleryDatabase:
                       CONSTRAINT fk_follows_follower FOREIGN KEY (follower_id) REFERENCES users(id) ON DELETE CASCADE,
                       CONSTRAINT fk_follows_followed FOREIGN KEY (followed_id) REFERENCES users(id) ON DELETE CASCADE,
                       CONSTRAINT chk_no_self_follow CHECK (follower_id <> followed_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS friend_requests (
+                      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                      requester_id BIGINT UNSIGNED NOT NULL,
+                      addressee_id BIGINT UNSIGNED NOT NULL,
+                      status ENUM('pending','accepted','declined','cancelled') NOT NULL DEFAULT 'pending',
+                      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      responded_at TIMESTAMP NULL DEFAULT NULL,
+                      UNIQUE KEY uniq_friend_pair (requester_id, addressee_id),
+                      KEY idx_friend_addressee_status (addressee_id, status, created_at),
+                      KEY idx_friend_requester_status (requester_id, status, created_at),
+                      CONSTRAINT fk_friend_requester FOREIGN KEY (requester_id) REFERENCES users(id) ON DELETE CASCADE,
+                      CONSTRAINT fk_friend_addressee FOREIGN KEY (addressee_id) REFERENCES users(id) ON DELETE CASCADE,
+                      CONSTRAINT chk_no_self_friend CHECK (requester_id <> addressee_id)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """
                 )
@@ -547,9 +574,11 @@ class GalleryDatabase:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
                     """
-                    SELECT id, username, display_name, bio, website_url, location_label, profile_color,
+                    SELECT id, username, display_name, bio, website_url, location_label, profile_headline,
+                           featured_tags, profile_color,
                            email, email_verified_at, avatar_path, avatar_file_id, avatar_mime_type, avatar_original_filename, public_profile,
-                           show_liked_count, birthdate, age_verified_at, adult_content_consent,
+                           show_liked_count, show_collections, show_recent_uploads, show_friends,
+                           birthdate, age_verified_at, adult_content_consent,
                            user_settings, created_at, updated_at
                     FROM users WHERE id=%s
                     """,
@@ -564,9 +593,14 @@ class GalleryDatabase:
             "bio": self._clean_text(payload.get("bio"), 500),
             "website_url": self._clean_text(payload.get("website_url"), 300),
             "location_label": self._clean_text(payload.get("location_label"), 80),
+            "profile_headline": self._clean_text(payload.get("profile_headline"), 120),
+            "featured_tags": json.dumps(self._clean_tags(payload.get("featured_tags") or [])),
             "profile_color": self._clean_color(payload.get("profile_color")),
             "public_profile": 1 if payload.get("public_profile", True) else 0,
             "show_liked_count": 1 if payload.get("show_liked_count", True) else 0,
+            "show_collections": 1 if payload.get("show_collections", True) else 0,
+            "show_recent_uploads": 1 if payload.get("show_recent_uploads", True) else 0,
+            "show_friends": 1 if payload.get("show_friends", True) else 0,
         }
         if fields["website_url"] and not fields["website_url"].startswith(("http://", "https://")):
             raise ValueError("Website must start with http:// or https://.")
@@ -576,7 +610,9 @@ class GalleryDatabase:
                     """
                     UPDATE users
                     SET display_name=%s, bio=%s, website_url=%s, location_label=%s,
-                        profile_color=%s, public_profile=%s, show_liked_count=%s
+                        profile_headline=%s, featured_tags=%s, profile_color=%s,
+                        public_profile=%s, show_liked_count=%s, show_collections=%s,
+                        show_recent_uploads=%s, show_friends=%s
                     WHERE id=%s
                     """,
                     (
@@ -584,9 +620,14 @@ class GalleryDatabase:
                         fields["bio"],
                         fields["website_url"],
                         fields["location_label"],
+                        fields["profile_headline"],
+                        fields["featured_tags"],
                         fields["profile_color"],
                         fields["public_profile"],
                         fields["show_liked_count"],
+                        fields["show_collections"],
+                        fields["show_recent_uploads"],
+                        fields["show_friends"],
                         user_id,
                     ),
                 )
@@ -1167,6 +1208,39 @@ class GalleryDatabase:
                 )
                 return [self._decode_media(row) for row in await cur.fetchall()]
 
+    async def list_profile_media(self, user_id: int, viewer_id: int | None = None, limit: int = 24, offset: int = 0) -> list[dict[str, Any]]:
+        viewer = int(viewer_id or 0)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT m.*, c.name AS category_name, c.slug AS category_slug,
+                           u.username,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.display_name ELSE u.username END AS display_name,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.bio ELSE NULL END AS user_bio,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.website_url ELSE NULL END AS user_website_url,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.avatar_path ELSE NULL END AS user_avatar_path,
+                           u.profile_color, u.public_profile,
+                           COUNT(DISTINCT l.user_id) AS like_count,
+                           COUNT(DISTINCT cm.id) AS comment_count,
+                           MAX(CASE WHEN b.user_id IS NULL THEN 0 ELSE 1 END) AS bookmarked_by_me,
+                           MAX(CASE WHEN l2.user_id IS NULL THEN 0 ELSE 1 END) AS liked_by_me
+                    FROM media_items m
+                    JOIN categories c ON c.id = m.category_id
+                    JOIN users u ON u.id = m.user_id
+                    LEFT JOIN media_likes l ON l.media_id = m.id
+                    LEFT JOIN media_likes l2 ON l2.media_id = m.id AND l2.user_id = %s
+                    LEFT JOIN media_bookmarks b ON b.media_id = m.id AND b.user_id = %s
+                    LEFT JOIN media_comments cm ON cm.media_id = m.id
+                    WHERE m.user_id=%s AND m.deleted_at IS NULL AND (m.visibility='public' OR m.user_id=%s)
+                    GROUP BY m.id
+                    ORDER BY m.pinned_at DESC, m.created_at DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    (viewer, viewer, viewer, viewer, viewer, viewer, user_id, viewer, max(1, min(limit, 100)), max(0, offset)),
+                )
+                return [self._decode_media(row) for row in await cur.fetchall()]
+
     async def list_user_follows(self, user_id: int, mode: str = "followers", viewer_id: int | None = None) -> list[dict[str, Any]]:
         viewer = int(viewer_id or 0)
         if mode == "following":
@@ -1309,6 +1383,30 @@ class GalleryDatabase:
                 )
                 return [self._decode_collection(row) for row in await cur.fetchall()]
 
+    async def list_user_collections(self, user_id: int, viewer_id: int | None = None, limit: int = 12) -> list[dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT mc.*, u.username, u.display_name, u.avatar_path AS user_avatar_path,
+                           COUNT(mci.media_id) AS item_count,
+                           MAX(mi.storage_path) AS cover_path,
+                           MAX(mi.media_kind) AS cover_media_kind,
+                           MAX(mi.id) AS cover_media_id,
+                           MAX(CASE WHEN mi.is_adult=1 THEN 1 ELSE 0 END) AS cover_is_adult
+                    FROM media_collections mc
+                    JOIN users u ON u.id = mc.user_id
+                    LEFT JOIN media_collection_items mci ON mci.collection_id = mc.id
+                    LEFT JOIN media_items mi ON mi.id = mci.media_id AND mi.deleted_at IS NULL
+                    WHERE mc.user_id=%s AND (mc.is_public=1 OR mc.user_id=%s)
+                    GROUP BY mc.id
+                    ORDER BY mc.updated_at DESC, mc.created_at DESC
+                    LIMIT %s
+                    """,
+                    (user_id, viewer_id or 0, max(1, min(limit, 60))),
+                )
+                return [self._decode_collection(row) for row in await cur.fetchall()]
+
     async def get_collection(self, collection_id: int, viewer_id: int | None = None) -> dict[str, Any] | None:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
@@ -1396,32 +1494,55 @@ class GalleryDatabase:
                     SELECT u.id, u.username,
                            CASE WHEN u.public_profile=1 OR u.id=%s THEN u.display_name ELSE u.username END AS display_name,
                            CASE WHEN u.public_profile=1 OR u.id=%s THEN u.bio ELSE NULL END AS bio,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.profile_headline ELSE NULL END AS profile_headline,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.featured_tags ELSE NULL END AS featured_tags,
                            CASE WHEN u.public_profile=1 OR u.id=%s THEN u.website_url ELSE NULL END AS website_url,
                            CASE WHEN u.public_profile=1 OR u.id=%s THEN u.location_label ELSE NULL END AS location_label,
                            CASE WHEN u.public_profile=1 OR u.id=%s THEN u.avatar_path ELSE NULL END AS avatar_path,
-                           u.avatar_file_id, u.profile_color, u.public_profile, u.created_at,
+                           u.avatar_file_id, u.profile_color, u.public_profile, u.show_liked_count,
+                           u.show_collections, u.show_recent_uploads, u.show_friends, u.created_at,
                            COUNT(DISTINCT m.id) AS media_count,
+                           COALESCE(SUM(CASE WHEN m.deleted_at IS NULL AND m.visibility='public' THEN m.downloads ELSE 0 END), 0) AS download_count,
+                           COUNT(DISTINCT ml.user_id, ml.media_id) AS like_count,
                            COUNT(DISTINCT f1.follower_id) AS follower_count,
                            COUNT(DISTINCT f2.followed_id) AS following_count,
+                           COUNT(DISTINCT CASE
+                               WHEN fr.status='accepted' AND (fr.requester_id=u.id OR fr.addressee_id=u.id)
+                               THEN fr.id END) AS friend_count,
                            MAX(CASE WHEN f3.follower_id=%s THEN 1 ELSE 0 END) AS followed_by_me
                     FROM users u
-                    LEFT JOIN media_items m ON m.user_id=u.id
+                    LEFT JOIN media_items m ON m.user_id=u.id AND m.deleted_at IS NULL AND (m.visibility='public' OR m.user_id=%s)
+                    LEFT JOIN media_likes ml ON ml.media_id=m.id
                     LEFT JOIN user_follows f1 ON f1.followed_id=u.id
                     LEFT JOIN user_follows f2 ON f2.follower_id=u.id
                     LEFT JOIN user_follows f3 ON f3.followed_id=u.id AND f3.follower_id=%s
+                    LEFT JOIN friend_requests fr ON fr.status='accepted' AND (fr.requester_id=u.id OR fr.addressee_id=u.id)
                     WHERE u.username=%s
                     GROUP BY u.id
                     """,
-                    (viewer, viewer, viewer, viewer, viewer, viewer, viewer, username),
+                    (viewer, viewer, viewer, viewer, viewer, viewer, viewer, viewer, viewer, viewer, username),
                 )
                 row = await cur.fetchone()
                 if not row:
                     return None
                 row["public_profile"] = bool(row.get("public_profile"))
+                row["show_liked_count"] = bool(row.get("show_liked_count"))
+                row["show_collections"] = bool(row.get("show_collections"))
+                row["show_recent_uploads"] = bool(row.get("show_recent_uploads"))
+                row["show_friends"] = bool(row.get("show_friends"))
                 row["followed_by_me"] = bool(row.get("followed_by_me"))
-                for k in ("media_count", "follower_count", "following_count"):
+                tags = row.get("featured_tags")
+                if isinstance(tags, str):
+                    try:
+                        row["featured_tags"] = json.loads(tags) or []
+                    except json.JSONDecodeError:
+                        row["featured_tags"] = []
+                elif tags is None:
+                    row["featured_tags"] = []
+                for k in ("media_count", "download_count", "like_count", "follower_count", "following_count", "friend_count"):
                     if isinstance(row.get(k), Decimal):
                         row[k] = int(row[k])
+                row["friend_status"] = await self.friend_status(viewer, int(row["id"])) if viewer else "none"
                 return row
 
     async def set_follow(self, follower_id: int, followed_id: int, following: bool) -> dict[str, Any] | None:
@@ -1439,6 +1560,189 @@ class GalleryDatabase:
                 await cur.execute("SELECT COUNT(*) AS n FROM user_follows WHERE followed_id=%s", (followed_id,))
                 followers = int((await cur.fetchone())["n"] or 0)
                 return {"followed_id": followed_id, "following": bool(following), "follower_count": followers}
+
+    async def friend_status(self, viewer_id: int | None, user_id: int) -> str:
+        if not viewer_id:
+            return "none"
+        if int(viewer_id) == int(user_id):
+            return "self"
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT requester_id, addressee_id, status
+                    FROM friend_requests
+                    WHERE (requester_id=%s AND addressee_id=%s)
+                       OR (requester_id=%s AND addressee_id=%s)
+                    ORDER BY FIELD(status, 'accepted', 'pending', 'declined', 'cancelled'), created_at DESC
+                    LIMIT 1
+                    """,
+                    (viewer_id, user_id, user_id, viewer_id),
+                )
+                row = await cur.fetchone()
+        if not row or row.get("status") in {"declined", "cancelled"}:
+            return "none"
+        if row["status"] == "accepted":
+            return "friends"
+        return "pending_out" if int(row["requester_id"]) == int(viewer_id) else "pending_in"
+
+    async def send_friend_request(self, requester_id: int, addressee_id: int) -> dict[str, Any]:
+        if requester_id == addressee_id:
+            raise ValueError("You cannot friend yourself.")
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT id FROM users WHERE id=%s", (addressee_id,))
+                if not await cur.fetchone():
+                    raise ValueError("User not found.")
+                await cur.execute(
+                    """
+                    SELECT * FROM friend_requests
+                    WHERE (requester_id=%s AND addressee_id=%s)
+                       OR (requester_id=%s AND addressee_id=%s)
+                    ORDER BY FIELD(status, 'accepted', 'pending', 'declined', 'cancelled'), created_at DESC
+                    LIMIT 1
+                    """,
+                    (requester_id, addressee_id, addressee_id, requester_id),
+                )
+                existing = await cur.fetchone()
+                if existing and existing["status"] == "accepted":
+                    return {"status": "friends", "request": existing}
+                if existing and existing["status"] == "pending":
+                    if int(existing["requester_id"]) == int(addressee_id):
+                        await cur.execute(
+                            "UPDATE friend_requests SET status='accepted', responded_at=CURRENT_TIMESTAMP WHERE id=%s",
+                            (existing["id"],),
+                        )
+                        existing["status"] = "accepted"
+                        return {"status": "friends", "request": existing}
+                    return {"status": "pending_out", "request": existing}
+                if existing:
+                    await cur.execute(
+                        """
+                        UPDATE friend_requests
+                        SET requester_id=%s, addressee_id=%s, status='pending', created_at=CURRENT_TIMESTAMP, responded_at=NULL
+                        WHERE id=%s
+                        """,
+                        (requester_id, addressee_id, existing["id"]),
+                    )
+                    request_id = existing["id"]
+                else:
+                    await cur.execute(
+                        "INSERT INTO friend_requests (requester_id, addressee_id) VALUES (%s, %s)",
+                        (requester_id, addressee_id),
+                    )
+                    request_id = cur.lastrowid
+                await cur.execute("SELECT * FROM friend_requests WHERE id=%s", (request_id,))
+                return {"status": "pending_out", "request": await cur.fetchone()}
+
+    async def respond_friend_request(self, user_id: int, request_id: int, action: str) -> dict[str, Any] | None:
+        status = {"accept": "accepted", "decline": "declined", "cancel": "cancelled"}.get(action)
+        if not status:
+            raise ValueError("Action must be accept, decline, or cancel.")
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                if action == "cancel":
+                    await cur.execute(
+                        "SELECT * FROM friend_requests WHERE id=%s AND requester_id=%s AND status='pending'",
+                        (request_id, user_id),
+                    )
+                else:
+                    await cur.execute(
+                        "SELECT * FROM friend_requests WHERE id=%s AND addressee_id=%s AND status='pending'",
+                        (request_id, user_id),
+                    )
+                row = await cur.fetchone()
+                if not row:
+                    return None
+                await cur.execute(
+                    "UPDATE friend_requests SET status=%s, responded_at=CURRENT_TIMESTAMP WHERE id=%s",
+                    (status, request_id),
+                )
+                row["status"] = status
+                return row
+
+    async def list_friend_requests(self, user_id: int, mode: str = "incoming") -> list[dict[str, Any]]:
+        if mode == "outgoing":
+            own_col, other_col = "requester_id", "addressee_id"
+        else:
+            own_col, other_col = "addressee_id", "requester_id"
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    f"""
+                    SELECT fr.*, u.id AS user_id, u.username, u.display_name, u.bio, u.avatar_path,
+                           u.profile_color, u.public_profile
+                    FROM friend_requests fr
+                    JOIN users u ON u.id=fr.{other_col}
+                    WHERE fr.{own_col}=%s AND fr.status='pending'
+                    ORDER BY fr.created_at DESC
+                    LIMIT 100
+                    """,
+                    (user_id,),
+                )
+                return [self._decode_user_request(row) for row in await cur.fetchall()]
+
+    async def list_friends(self, user_id: int, viewer_id: int | None = None, limit: int = 80) -> list[dict[str, Any]]:
+        viewer = int(viewer_id or 0)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT u.id, u.username,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.display_name ELSE u.username END AS display_name,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.bio ELSE NULL END AS bio,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.avatar_path ELSE NULL END AS avatar_path,
+                           u.profile_color, u.public_profile, fr.responded_at AS friended_at
+                    FROM friend_requests fr
+                    JOIN users u ON u.id = CASE WHEN fr.requester_id=%s THEN fr.addressee_id ELSE fr.requester_id END
+                    WHERE fr.status='accepted' AND (fr.requester_id=%s OR fr.addressee_id=%s)
+                    ORDER BY fr.responded_at DESC, fr.created_at DESC
+                    LIMIT %s
+                    """,
+                    (viewer, viewer, viewer, user_id, user_id, user_id, max(1, min(limit, 200))),
+                )
+                return [self._decode_user(row) for row in await cur.fetchall()]
+
+    async def search_users(self, query: str, viewer_id: int | None = None, limit: int = 30) -> list[dict[str, Any]]:
+        query = " ".join(str(query or "").strip().split())[:80]
+        if not query:
+            return []
+        needle = f"%{query}%"
+        viewer = int(viewer_id or 0)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT u.id, u.username,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.display_name ELSE u.username END AS display_name,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.bio ELSE NULL END AS bio,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.profile_headline ELSE NULL END AS profile_headline,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.avatar_path ELSE NULL END AS avatar_path,
+                           u.profile_color, u.public_profile, u.show_liked_count, u.show_collections,
+                           u.show_recent_uploads, u.show_friends, u.adult_content_consent, u.email_verified_at,
+                           COUNT(DISTINCT m.id) AS media_count,
+                           COUNT(DISTINCT f.follower_id) AS follower_count,
+                           MAX(CASE WHEN mine.follower_id IS NULL THEN 0 ELSE 1 END) AS followed_by_me
+                    FROM users u
+                    LEFT JOIN media_items m ON m.user_id=u.id AND m.deleted_at IS NULL AND m.visibility='public'
+                    LEFT JOIN user_follows f ON f.followed_id=u.id
+                    LEFT JOIN user_follows mine ON mine.followed_id=u.id AND mine.follower_id=%s
+                    WHERE u.username LIKE %s OR u.display_name LIKE %s OR u.bio LIKE %s OR u.profile_headline LIKE %s
+                    GROUP BY u.id
+                    ORDER BY (u.username=%s) DESC, follower_count DESC, media_count DESC, u.created_at DESC
+                    LIMIT %s
+                    """,
+                    (viewer, viewer, viewer, viewer, viewer, needle, needle, needle, needle, query, max(1, min(limit, 60))),
+                )
+                users = []
+                for row in await cur.fetchall():
+                    row = self._decode_user(row)
+                    row["media_count"] = int(row.get("media_count") or 0)
+                    row["follower_count"] = int(row.get("follower_count") or 0)
+                    row["followed_by_me"] = bool(row.get("followed_by_me"))
+                    row["friend_status"] = await self.friend_status(viewer, int(row["id"])) if viewer else "none"
+                    users.append(row)
+                return users
 
     async def change_password(self, user_id: int, old_password: str, new_password: str) -> bool:
         if len(new_password or "") < 8:
@@ -1545,19 +1849,15 @@ class GalleryDatabase:
                         mime_type = (row.get("mime_type") or mimetypes.guess_type(str(path))[0] or "application/octet-stream")[:120]
                         media_kind = row.get("media_kind") if row.get("media_kind") in {"image", "video"} else ("video" if mime_type.startswith("video/") else "image")
                         original = (row.get("original_filename") or path.name)[:255]
-                        await cur.execute("SELECT id FROM media_files WHERE sha256=%s", (sha256,))
-                        file_row = await cur.fetchone()
-                        if file_row:
-                            file_id = int(file_row["id"])
-                        else:
-                            await cur.execute(
-                                """
-                                INSERT INTO media_files (sha256, mime_type, original_filename, media_kind, file_size, content, created_by)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                                """,
-                                (sha256, mime_type, original, media_kind, len(content), content, row.get("user_id")),
-                            )
-                            file_id = int(cur.lastrowid)
+                        await cur.execute(
+                            """
+                            INSERT INTO media_files (sha256, mime_type, original_filename, media_kind, file_size, content, created_by)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id)
+                            """,
+                            (sha256, mime_type, original, media_kind, len(content), content, row.get("user_id")),
+                        )
+                        file_id = int(cur.lastrowid)
                         await cur.execute(
                             "UPDATE media_items SET media_file_id=%s, content_sha256=%s, file_size=%s, storage_path=%s WHERE id=%s",
                             (file_id, sha256, len(content), f"db://media/{file_id}", row["id"]),
@@ -1646,9 +1946,20 @@ class GalleryDatabase:
         user["user_settings"] = settings
         user["public_profile"] = bool(user.get("public_profile"))
         user["show_liked_count"] = bool(user.get("show_liked_count"))
+        user["show_collections"] = bool(user.get("show_collections"))
+        user["show_recent_uploads"] = bool(user.get("show_recent_uploads"))
+        user["show_friends"] = bool(user.get("show_friends"))
         user["adult_content_consent"] = bool(user.get("adult_content_consent"))
         user["age_verified"] = bool(user.get("age_verified_at"))
         user["email_verified"] = bool(user.get("email_verified_at"))
+        tags = user.get("featured_tags")
+        if isinstance(tags, str):
+            try:
+                user["featured_tags"] = json.loads(tags) or []
+            except json.JSONDecodeError:
+                user["featured_tags"] = []
+        elif tags is None:
+            user["featured_tags"] = []
         return user
 
     def _decode_collection(self, row: dict[str, Any]) -> dict[str, Any]:
@@ -1658,6 +1969,26 @@ class GalleryDatabase:
             if isinstance(row.get(key), Decimal):
                 row[key] = int(row[key])
         return row
+
+    def _decode_user_request(self, row: dict[str, Any]) -> dict[str, Any]:
+        user = {
+            "id": row.get("user_id"),
+            "username": row.get("username"),
+            "display_name": row.get("display_name"),
+            "bio": row.get("bio") if row.get("public_profile") else None,
+            "avatar_path": row.get("avatar_path") if row.get("public_profile") else None,
+            "profile_color": row.get("profile_color"),
+            "public_profile": row.get("public_profile"),
+        }
+        return {
+            "id": row.get("id"),
+            "requester_id": row.get("requester_id"),
+            "addressee_id": row.get("addressee_id"),
+            "status": row.get("status"),
+            "created_at": row.get("created_at"),
+            "responded_at": row.get("responded_at"),
+            "user": self._decode_user(user),
+        }
 
     def _clean_text(self, value: Any, max_length: int, required: bool = False) -> str | None:
         text = " ".join(str(value or "").strip().split())
@@ -1672,3 +2003,11 @@ class GalleryDatabase:
         if not re.fullmatch(r"#[0-9A-Fa-f]{6}", color):
             raise ValueError("Color must be a hex value like #37c9a7.")
         return color.lower()
+
+    def _clean_tags(self, values: list[Any]) -> list[str]:
+        clean = []
+        for raw in values:
+            tag = re.sub(r"[^A-Za-z0-9_.-]+", "", str(raw).strip())[:32]
+            if tag and tag.lower() not in {existing.lower() for existing in clean}:
+                clean.append(tag)
+        return clean[:12]

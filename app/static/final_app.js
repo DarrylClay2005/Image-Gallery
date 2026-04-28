@@ -15,6 +15,10 @@ const DEFAULT_USER_SETTINGS = {
   reduce_motion: false,
   open_original_in_new_tab: false,
   blur_video_previews: false,
+  profile_show_uploads: true,
+  profile_show_collections: true,
+  profile_show_friends: true,
+  profile_show_follow_counts: true,
 };
 
 let apiOrigin = "";
@@ -27,6 +31,9 @@ let activeDetail = null;
 let selectedCollectionMediaId = null;
 let selectedReportMediaId = null;
 let registerMode = false;
+let uploadInFlight = false;
+let uploadStartedAt = 0;
+let activeProfileUsername = "";
 const revealedAdultMedia = new Set();
 
 const $ = (id) => document.getElementById(id);
@@ -123,6 +130,43 @@ async function apiBlobFetch(path, options = {}) {
   return response;
 }
 
+function apiUpload(path, body, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", apiUrl(path));
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    xhr.upload.addEventListener("progress", (event) => {
+      if (!event.lengthComputable) return;
+      onProgress?.({
+        loaded: event.loaded,
+        total: event.total,
+        percent: Math.max(0, Math.min(100, Math.round((event.loaded / event.total) * 100))),
+      });
+    });
+    xhr.addEventListener("load", () => {
+      let data = {};
+      try { data = xhr.responseText ? JSON.parse(xhr.responseText) : {}; } catch (_err) { data = { detail: xhr.responseText || "Invalid server response" }; }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else {
+        const error = new Error(data.detail || data.message || "Upload failed");
+        error.status = xhr.status;
+        reject(error);
+      }
+    });
+    xhr.addEventListener("error", () => {
+      const error = new Error("Backend unreachable during upload.");
+      error.status = 0;
+      reject(error);
+    });
+    xhr.addEventListener("abort", () => {
+      const error = new Error("Upload was cancelled.");
+      error.status = 0;
+      reject(error);
+    });
+    xhr.send(body);
+  });
+}
+
 function filenameFromDisposition(disposition, fallback = "download") {
   const match = String(disposition || "").match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
   const raw = decodeURIComponent(match?.[1] || match?.[2] || fallback);
@@ -156,6 +200,8 @@ function renderAuth() {
   $("logout").hidden = !currentUser;
   $("settings-open").hidden = !currentUser;
   $("studio-open").hidden = !currentUser;
+  showIfPresent("profile-open", Boolean(currentUser));
+  showIfPresent("friends-open", Boolean(currentUser));
   $("account-card").hidden = !currentUser;
   if (currentUser) {
     $("account-name").textContent = currentUser.display_name || currentUser.username;
@@ -307,9 +353,14 @@ function fillSettingsForm() {
   setValue("settings-profile-color", currentUser.profile_color || prefs.accent_color || "#37c9a7");
   setValue("settings-website", currentUser.website_url || "");
   setValue("settings-location", currentUser.location_label || "");
+  setValue("settings-profile-headline", currentUser.profile_headline || "");
+  setValue("settings-featured-tags", (currentUser.featured_tags || []).join(", "));
   setValue("settings-bio", currentUser.bio || "");
   setChecked("settings-public-profile", currentUser.public_profile !== false);
   setChecked("settings-show-liked-count", currentUser.show_liked_count !== false);
+  setChecked("settings-show-collections", currentUser.show_collections !== false);
+  setChecked("settings-show-uploads", currentUser.show_recent_uploads !== false);
+  setChecked("settings-show-friends", currentUser.show_friends !== false);
   setValue("pref-theme-mode", prefs.theme_mode || "system");
   setValue("pref-accent-color", prefs.accent_color || "#37c9a7");
   setValue("pref-grid-density", prefs.grid_density || "comfortable");
@@ -335,9 +386,14 @@ async function submitSettings(event) {
       bio: $("settings-bio").value.trim() || null,
       website_url: $("settings-website").value.trim() || null,
       location_label: $("settings-location").value.trim() || null,
+      profile_headline: $("settings-profile-headline").value.trim() || null,
+      featured_tags: $("settings-featured-tags").value.split(",").map((tag) => tag.trim()).filter(Boolean),
       profile_color: $("settings-profile-color").value || "#37c9a7",
       public_profile: $("settings-public-profile").checked,
       show_liked_count: $("settings-show-liked-count").checked,
+      show_collections: $("settings-show-collections").checked,
+      show_recent_uploads: $("settings-show-uploads").checked,
+      show_friends: $("settings-show-friends").checked,
     };
     let data = await apiFetch("/api/me/profile", {
       method: "PATCH",
@@ -356,6 +412,10 @@ async function submitSettings(event) {
       reduce_motion: $("pref-reduce-motion").checked,
       open_original_in_new_tab: $("pref-open-original").checked,
       blur_video_previews: $("pref-blur-video-previews").checked,
+      profile_show_uploads: $("settings-show-uploads").checked,
+      profile_show_collections: $("settings-show-collections").checked,
+      profile_show_friends: $("settings-show-friends").checked,
+      profile_show_follow_counts: $("settings-show-liked-count").checked,
     };
     data = await apiFetch("/api/me/settings", {
       method: "PATCH",
@@ -652,10 +712,10 @@ function renderMediaGrid() {
       <button class="media-preview" type="button" data-open="${item.id}">${renderPreview(item)}</button>
       <div class="media-info">
         <div class="author-row">
-          <div class="avatar tiny" style="border-color:${escapeHtml(item.profile_color || "#37c9a7")}">${item.user_avatar_url ? `<img src="${item.user_avatar_url}" alt="">` : escapeHtml((item.display_name || item.username || "IG").slice(0, 2).toUpperCase())}</div>
+          <button type="button" class="avatar tiny" style="border-color:${escapeHtml(item.profile_color || "#37c9a7")}" data-profile="${escapeHtml(item.username || "")}">${item.user_avatar_url ? `<img src="${item.user_avatar_url}" alt="">` : escapeHtml((item.display_name || item.username || "IG").slice(0, 2).toUpperCase())}</button>
           <div>
           <h2>${adultBadge(item)}${escapeHtml(item.title)}</h2>
-          <p class="muted">${escapeHtml(item.category_name)} by ${escapeHtml(item.display_name || item.username)}${item.visibility && item.visibility !== "public" ? ` · ${escapeHtml(item.visibility)}` : ""}${item.pinned_at ? " · pinned" : ""}</p>
+          <p class="muted">${escapeHtml(item.category_name)} by <button type="button" class="text-button" data-profile="${escapeHtml(item.username || "")}">${escapeHtml(item.display_name || item.username)}</button>${item.visibility && item.visibility !== "public" ? ` · ${escapeHtml(item.visibility)}` : ""}${item.pinned_at ? " · pinned" : ""}</p>
           </div>
         </div>
         <div class="metric-row">
@@ -697,7 +757,7 @@ async function openDetail(id) {
     : `<img src="${item.url}" alt="${escapeHtml(item.title)}" />`;
   $("detail-meta").textContent = `${item.category_name} by ${item.display_name || item.username} - ${formatBytes(item.file_size)} - ${item.like_count || 0} likes`;
   $("detail-description").innerHTML = `
-    ${item.user_avatar_url ? `<div class="profile-mini"><div class="avatar"><img src="${item.user_avatar_url}" alt=""></div><div><strong>${escapeHtml(item.display_name || item.username)}</strong>${item.user_bio ? `<p>${escapeHtml(item.user_bio)}</p>` : ""}${item.user_website_url ? `<a href="${item.user_website_url}" target="_blank" rel="noopener">Website</a>` : ""}</div></div>` : ""}
+    ${item.user_avatar_url ? `<div class="profile-mini"><button type="button" class="avatar" data-profile="${escapeHtml(item.username || "")}"><img src="${item.user_avatar_url}" alt=""></button><div><button type="button" class="text-button strong" data-profile="${escapeHtml(item.username || "")}">${escapeHtml(item.display_name || item.username)}</button>${item.user_bio ? `<p>${escapeHtml(item.user_bio)}</p>` : ""}${item.user_website_url ? `<a href="${item.user_website_url}" target="_blank" rel="noopener">Website</a>` : ""}</div></div>` : ""}
     <p>${escapeHtml(item.description || "")}</p>
   `;
   $("detail-tags").innerHTML = (item.tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
@@ -977,6 +1037,209 @@ async function loadLikedFeed() {
   renderMediaGrid();
 }
 
+function friendButtonLabel(status) {
+  return {
+    self: "You",
+    friends: "Friends",
+    pending_out: "Requested",
+    pending_in: "Accept Request",
+  }[status || "none"] || "Add Friend";
+}
+
+function userCard(user, { compact = false } = {}) {
+  const avatar = user.avatar_url
+    ? `<img src="${user.avatar_url}" alt="">`
+    : escapeHtml((user.display_name || user.username || "IG").slice(0, 2).toUpperCase());
+  return `
+    <article class="user-card">
+      <button type="button" class="avatar" style="border-color:${escapeHtml(user.profile_color || "#37c9a7")}" data-profile="${escapeHtml(user.username)}">${avatar}</button>
+      <div>
+        <h3>${escapeHtml(user.display_name || user.username)}</h3>
+        <p class="muted">@${escapeHtml(user.username)}${user.profile_headline ? ` - ${escapeHtml(user.profile_headline)}` : ""}</p>
+        ${!compact && user.bio ? `<p>${escapeHtml(user.bio)}</p>` : ""}
+        ${!compact ? `<p class="muted">${Number(user.media_count || 0)} posts · ${Number(user.follower_count || 0)} followers</p>` : ""}
+      </div>
+      <div class="user-card-actions">
+        <button type="button" data-profile="${escapeHtml(user.username)}">Profile</button>
+        <button type="button" data-follow-user="${user.id}">${user.followed_by_me ? "Unfollow" : "Follow"}</button>
+        <button type="button" data-friend-user="${user.id}" ${["self", "friends", "pending_out"].includes(user.friend_status) ? "disabled" : ""}>${friendButtonLabel(user.friend_status)}</button>
+      </div>
+    </article>
+  `;
+}
+
+async function openUserSearchDialog() {
+  $("user-search-dialog").showModal();
+  const input = $("user-search-input");
+  if (!input.value.trim() && currentUser) input.value = "";
+  input.focus();
+  await searchUsers();
+}
+
+async function searchUsers() {
+  const query = $("user-search-input").value.trim();
+  const list = $("user-search-results");
+  if (!query) {
+    list.innerHTML = `<p class="muted">Search by username, display name, bio, or headline.</p>`;
+    return;
+  }
+  try {
+    const data = await apiFetch(`/api/users/search?q=${encodeURIComponent(query)}`);
+    const users = data.users || [];
+    list.innerHTML = users.length ? users.map((user) => userCard(user)).join("") : `<p class="muted">No users found.</p>`;
+  } catch (err) {
+    list.innerHTML = `<p class="muted">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+async function toggleFollowUser(userId, following = null) {
+  if (!currentUser) return $("auth-dialog").showModal();
+  const button = document.querySelector(`[data-follow-user="${userId}"]`);
+  const next = following ?? !(button?.textContent || "").toLowerCase().includes("unfollow");
+  await apiFetch(`/api/users/${userId}/follow`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ following: next }),
+  });
+  if (activeProfileUsername) await openProfile(activeProfileUsername);
+  else await searchUsers();
+}
+
+async function sendFriendRequest(userId) {
+  if (!currentUser) return $("auth-dialog").showModal();
+  const data = await apiFetch(`/api/users/${userId}/friend-request`, { method: "POST" });
+  const status = data.status || "pending_out";
+  document.querySelectorAll(`[data-friend-user="${userId}"]`).forEach((button) => {
+    button.textContent = friendButtonLabel(status);
+    button.disabled = ["friends", "pending_out"].includes(status);
+  });
+  if (activeProfileUsername) await openProfile(activeProfileUsername);
+}
+
+async function openProfile(username) {
+  if (!username) return;
+  activeProfileUsername = username;
+  const data = await apiFetch(`/api/users/${encodeURIComponent(username)}/profile`);
+  renderProfile(data);
+  if (location.hash !== `#user/${encodeURIComponent(username)}`) {
+    history.replaceState(null, "", `#user/${encodeURIComponent(username)}`);
+  }
+  if (!$("profile-dialog").open) $("profile-dialog").showModal();
+}
+
+function renderProfile(data) {
+  const user = data.user || {};
+  $("profile-dialog-title").textContent = user.display_name || user.username || "Profile";
+  const tags = (user.featured_tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
+  const media = data.media || [];
+  const collections = data.collections || [];
+  const friends = data.friends || [];
+  $("profile-view").innerHTML = `
+    <section class="profile-hero" style="--profile-accent:${escapeHtml(user.profile_color || "#37c9a7")}">
+      <div class="avatar large">${user.avatar_url ? `<img src="${user.avatar_url}" alt="">` : escapeHtml((user.display_name || user.username || "IG").slice(0, 2).toUpperCase())}</div>
+      <div>
+        <h2>${escapeHtml(user.display_name || user.username)}</h2>
+        <p class="muted">@${escapeHtml(user.username || "")}${user.location_label ? ` · ${escapeHtml(user.location_label)}` : ""}</p>
+        ${user.profile_headline ? `<p class="profile-headline">${escapeHtml(user.profile_headline)}</p>` : ""}
+        ${user.bio ? `<p>${escapeHtml(user.bio)}</p>` : ""}
+        ${tags ? `<div class="tag-row">${tags}</div>` : ""}
+      </div>
+      <div class="profile-actions">
+        <button type="button" data-follow-user="${user.id}">${user.followed_by_me ? "Unfollow" : "Follow"}</button>
+        <button type="button" data-friend-user="${user.id}" ${["self", "friends", "pending_out"].includes(user.friend_status) ? "disabled" : ""}>${friendButtonLabel(user.friend_status)}</button>
+        <button type="button" data-copy-profile="${escapeHtml(user.username || "")}">Copy Link</button>
+        ${user.website_url ? `<a class="button-link" href="${escapeHtml(user.website_url)}" target="_blank" rel="noopener">Website</a>` : ""}
+      </div>
+    </section>
+    <section class="profile-stats">
+      <div><strong>${Number(user.media_count || 0)}</strong><span>Posts</span></div>
+      <div><strong>${Number(user.follower_count || 0)}</strong><span>Followers</span></div>
+      <div><strong>${Number(user.following_count || 0)}</strong><span>Following</span></div>
+      <div><strong>${Number(user.friend_count || 0)}</strong><span>Friends</span></div>
+      <div><strong>${formatBytes(user.download_count || 0)}</strong><span>Downloads</span></div>
+      <div><strong>${Number(user.like_count || 0)}</strong><span>Likes</span></div>
+    </section>
+    <section class="profile-section">
+      <div class="section-title-row"><h3>Recent Uploads</h3><span class="muted">${media.length}</span></div>
+      <div class="mini-media-grid">${media.length ? media.map((item) => `
+        <button class="mini-media" type="button" data-open="${item.id}">
+          ${renderPreview(item, "mini")}
+          <span>${adultBadge(item)}${escapeHtml(item.title)}</span>
+        </button>
+      `).join("") : `<p class="muted">No public uploads to show.</p>`}</div>
+    </section>
+    <section class="profile-section">
+      <div class="section-title-row"><h3>Collections</h3><span class="muted">${collections.length}</span></div>
+      <div class="collection-list">${collections.length ? collections.map((collection) => `
+        <article class="collection-card">
+          <button type="button" data-collection-open="${collection.id}" class="collection-cover">
+            ${collection.cover_url ? `<img src="${collection.cover_url}" alt="">` : `<span>${collection.cover_locked ? "18+" : escapeHtml(collection.name.slice(0, 2).toUpperCase())}</span>`}
+          </button>
+          <div><h3>${escapeHtml(collection.name)}</h3><p class="muted">${escapeHtml(collection.description || "No description")} · ${collection.item_count || 0} posts</p></div>
+        </article>
+      `).join("") : `<p class="muted">No public collections to show.</p>`}</div>
+    </section>
+    <section class="profile-section">
+      <div class="section-title-row"><h3>Friends</h3><span class="muted">${friends.length}</span></div>
+      <div class="user-results compact">${friends.length ? friends.map((friend) => userCard(friend, { compact: true })).join("") : `<p class="muted">No friends to show.</p>`}</div>
+    </section>
+  `;
+}
+
+async function openFriendsDialog() {
+  if (!currentUser) return $("auth-dialog").showModal();
+  $("friends-dialog").showModal();
+  await loadFriendPanel();
+}
+
+async function loadFriendPanel() {
+  const requests = await apiFetch("/api/friends/requests");
+  const friends = await apiFetch("/api/me/friends");
+  const incoming = requests.incoming || [];
+  const outgoing = requests.outgoing || [];
+  $("friend-requests-list").innerHTML = `
+    ${incoming.length ? `<h3>Incoming</h3>${incoming.map((item) => `
+      <article class="user-card">
+        ${userCard(item.user, { compact: true })}
+        <div class="user-card-actions">
+          <button type="button" data-friend-action="accept" data-request-id="${item.id}">Accept</button>
+          <button type="button" data-friend-action="decline" data-request-id="${item.id}">Decline</button>
+        </div>
+      </article>
+    `).join("")}` : `<p class="muted">No incoming friend requests.</p>`}
+    ${outgoing.length ? `<h3>Outgoing</h3>${outgoing.map((item) => `
+      <article class="user-card">
+        ${userCard(item.user, { compact: true })}
+        <div class="user-card-actions"><button type="button" data-friend-action="cancel" data-request-id="${item.id}">Cancel</button></div>
+      </article>
+    `).join("")}` : ""}
+  `;
+  $("friends-list").innerHTML = (friends.friends || []).length ? friends.friends.map((friend) => userCard(friend, { compact: true })).join("") : `<p class="muted">No friends yet.</p>`;
+}
+
+async function respondFriendRequest(requestId, action) {
+  await apiFetch(`/api/friends/requests/${requestId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action }),
+  });
+  await loadFriendPanel();
+}
+
+async function copyProfileLink(username) {
+  const url = `${location.origin}${location.pathname}#user/${encodeURIComponent(username)}`;
+  try {
+    await navigator.clipboard.writeText(url);
+  } catch (_err) {
+    const temp = document.createElement("input");
+    temp.value = url;
+    document.body.appendChild(temp);
+    temp.select();
+    document.execCommand("copy");
+    temp.remove();
+  }
+}
+
 async function deleteOwnMedia(id) {
   if (!confirm("Archive this post? It will disappear from the gallery but can be restored from Studio.")) return;
   await apiFetch(`/api/media/${id}`, { method: "DELETE" });
@@ -1051,13 +1314,37 @@ function ensureUploadControlFields() {
 }
 
 function closeUploadDialog() {
+  if (uploadInFlight) return;
   setNotice("upload-error", "");
   const form = safeEl("upload-form");
   if (form) form.reset();
   setTextIfPresent("file-label", "Choose image, GIF, or video under 500MB");
+  resetUploadProgress();
   const dialog = safeEl("upload-dialog");
   if (dialog?.open) dialog.close();
   checkUploadReadiness();
+}
+
+function setUploadProgress(percent, label = "Uploading") {
+  showIfPresent("upload-progress-wrap", true);
+  const bar = safeEl("upload-progress-bar");
+  const pct = Math.max(0, Math.min(100, Number(percent || 0)));
+  if (bar) bar.style.width = `${pct}%`;
+  setTextIfPresent("upload-progress-percent", `${Math.round(pct)}%`);
+  setTextIfPresent("upload-progress-label", label);
+}
+
+function resetUploadProgress() {
+  showIfPresent("upload-progress-wrap", false);
+  const bar = safeEl("upload-progress-bar");
+  if (bar) bar.style.width = "0%";
+  setTextIfPresent("upload-progress-percent", "0%");
+  setTextIfPresent("upload-progress-label", "Preparing upload");
+  const button = safeEl("upload-submit");
+  if (button) {
+    button.classList.remove("is-uploading");
+    button.textContent = "Post";
+  }
 }
 
 function openAccountPanel() {
@@ -1068,6 +1355,7 @@ function openAccountPanel() {
 
 async function submitUpload(event) {
   event.preventDefault();
+  if (uploadInFlight) return;
   if (!currentUser) {
     $("upload-dialog").close();
     $("auth-dialog").showModal();
@@ -1094,13 +1382,28 @@ async function submitUpload(event) {
     body.set("category_kind", $("new-category-kind").value);
   }
   try {
+    uploadInFlight = true;
+    uploadStartedAt = Date.now();
     setDisabledIfPresent("upload-submit", true);
-    await apiFetch("/api/media", { method: "POST", body });
+    const submit = safeEl("upload-submit");
+    if (submit) {
+      submit.classList.add("is-uploading");
+      submit.textContent = "Uploading...";
+    }
+    setUploadProgress(0, "Starting upload");
+    await apiUpload("/api/media", body, ({ loaded, total, percent }) => {
+      const seconds = Math.max(1, Math.round((Date.now() - uploadStartedAt) / 1000));
+      setUploadProgress(percent, `${formatBytes(loaded)} of ${formatBytes(total)} uploaded in ${seconds}s`);
+    });
+    setUploadProgress(100, "Processing upload");
+    uploadInFlight = false;
     closeUploadDialog();
     await refreshAll();
   } catch (err) {
     setNotice("upload-error", err.message);
   } finally {
+    uploadInFlight = false;
+    resetUploadProgress();
     checkUploadReadiness();
   }
 }
@@ -1205,7 +1508,7 @@ function checkUploadReadiness() {
     else if (!title) message = "Add a title before uploading.";
   }
   setNotice("upload-error", message);
-  setDisabledIfPresent("upload-submit", Boolean(message));
+  setDisabledIfPresent("upload-submit", Boolean(message) || uploadInFlight);
 }
 
 function bindEvents() {
@@ -1234,6 +1537,23 @@ function bindEvents() {
   $("settings-email-save").addEventListener("click", saveEmailAndSendCode);
   $("settings-email-verify").addEventListener("click", verifyEmailCode);
   $("surprise-open").addEventListener("click", openSurprise);
+  on("users-open", "click", openUserSearchDialog);
+  on("profile-open", "click", () => currentUser && openProfile(currentUser.username));
+  on("user-search-close", "click", () => $("user-search-dialog").close());
+  on("user-search-input", "input", () => {
+    clearTimeout(window.__userSearchTimer);
+    window.__userSearchTimer = setTimeout(searchUsers, 180);
+  });
+  on("friends-open", "click", openFriendsDialog);
+  on("friends-close", "click", () => $("friends-dialog").close());
+  on("friend-tab-incoming", "click", () => {
+    showIfPresent("friend-requests-list", true);
+    showIfPresent("friends-list", false);
+  });
+  on("friend-tab-list", "click", () => {
+    showIfPresent("friend-requests-list", false);
+    showIfPresent("friends-list", true);
+  });
   on("following-feed", "click", loadFollowingFeed);
   on("liked-feed", "click", loadLikedFeed);
   on("live-checks-open", "click", () => runLiveChecks({ silent: false }));
@@ -1282,6 +1602,7 @@ function bindEvents() {
   ["search", "kind-filter", "category-filter", "sort-filter"].forEach((id) => $(id).addEventListener("input", loadMedia));
   $("gallery-grid").addEventListener("click", async (event) => {
     const open = event.target.closest("[data-open]");
+    const profile = event.target.closest("[data-profile]");
     const like = event.target.closest("[data-like]");
     const bookmark = event.target.closest("[data-bookmark]");
     const collect = event.target.closest("[data-collect]");
@@ -1290,6 +1611,7 @@ function bindEvents() {
     const ageGate = event.target.closest("[data-age-gate]");
     const download = event.target.closest("[data-download]");
     const del = event.target.closest("[data-delete-media]");
+    if (profile) return openProfile(profile.dataset.profile);
     if (open && !handleAdultOpen(open.dataset.open)) await openDetail(open.dataset.open);
     if (manage) await editOwnMedia(manage.dataset.editMedia);
     if (del) await deleteOwnMedia(del.dataset.deleteMedia);
@@ -1299,6 +1621,46 @@ function bindEvents() {
     if (collect) await openCollectionPicker(collect.dataset.collect);
     if (copy) await copyAddress(copy.dataset.copy);
     if (ageGate) openAgeDialog("Verify your age to download this 18+ post.");
+  });
+  $("user-search-results").addEventListener("click", async (event) => {
+    const profile = event.target.closest("[data-profile]");
+    const follow = event.target.closest("[data-follow-user]");
+    const friend = event.target.closest("[data-friend-user]");
+    if (profile) await openProfile(profile.dataset.profile);
+    if (follow) await toggleFollowUser(follow.dataset.followUser);
+    if (friend) await sendFriendRequest(friend.dataset.friendUser);
+  });
+  $("friends-dialog").addEventListener("click", async (event) => {
+    const action = event.target.closest("[data-friend-action]");
+    const profile = event.target.closest("[data-profile]");
+    const follow = event.target.closest("[data-follow-user]");
+    const friend = event.target.closest("[data-friend-user]");
+    if (action) await respondFriendRequest(action.dataset.requestId, action.dataset.friendAction);
+    if (profile) await openProfile(profile.dataset.profile);
+    if (follow) await toggleFollowUser(follow.dataset.followUser);
+    if (friend) await sendFriendRequest(friend.dataset.friendUser);
+  });
+  $("profile-close").addEventListener("click", () => {
+    activeProfileUsername = "";
+    if (location.hash.startsWith("#user/")) history.replaceState(null, "", location.pathname + location.search);
+    $("profile-dialog").close();
+  });
+  $("profile-view").addEventListener("click", async (event) => {
+    const open = event.target.closest("[data-open]");
+    const collection = event.target.closest("[data-collection-open]");
+    const profile = event.target.closest("[data-profile]");
+    const follow = event.target.closest("[data-follow-user]");
+    const friend = event.target.closest("[data-friend-user]");
+    const copyProfile = event.target.closest("[data-copy-profile]");
+    if (open && !handleAdultOpen(open.dataset.open)) await openDetail(open.dataset.open);
+    if (collection) {
+      $("collections-dialog").showModal();
+      await openCollection(collection.dataset.collectionOpen);
+    }
+    if (profile) await openProfile(profile.dataset.profile);
+    if (follow) await toggleFollowUser(follow.dataset.followUser);
+    if (friend) await sendFriendRequest(friend.dataset.friendUser);
+    if (copyProfile) await copyProfileLink(copyProfile.dataset.copyProfile);
   });
   $("collections-list").addEventListener("click", async (event) => {
     const open = event.target.closest("[data-collection-open]");
@@ -1327,6 +1689,8 @@ function bindEvents() {
   $("detail-dialog").addEventListener("close", () => stopMediaPlayback($("detail-dialog")));
   $("detail-dialog").addEventListener("click", (event) => {
     if (event.target === $("detail-dialog")) closeDetailDialog();
+    const profile = event.target.closest("[data-profile]");
+    if (profile) openProfile(profile.dataset.profile);
   });
   $("detail-like").addEventListener("click", () => activeDetail && toggleLike(activeDetail.id));
   $("detail-bookmark").addEventListener("click", () => activeDetail && toggleBookmark(activeDetail.id));
@@ -1361,6 +1725,8 @@ async function boot() {
   try {
     if (token) await refreshMe();
     await refreshAll();
+    const hashProfile = decodeURIComponent(location.hash || "").match(/^#user\/(.+)/)?.[1];
+    if (hashProfile) await openProfile(hashProfile);
     $("connection-status").textContent = REMOTE_MODE ? "Live" : "Local";
     runLiveChecks({ silent: true });
   } catch (err) {

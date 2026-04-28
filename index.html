@@ -17,10 +17,13 @@
       <span id="connection-status" class="status-pill" hidden>Connecting</span>
       <button id="surprise-open" type="button">Surprise</button>
       <button id="collections-open" type="button">Collections</button>
+      <button id="users-open" type="button">Users</button>
       <button id="following-feed" type="button">Following</button>
+      <button id="friends-open" type="button" hidden>Friends</button>
       <button id="liked-feed" type="button">Liked</button>
       <button id="live-checks-open" type="button">Checks</button>
       <button id="studio-open" type="button" hidden>Studio</button>
+      <button id="profile-open" type="button" hidden>Profile</button>
       <button id="upload-open" class="primary" type="button">Upload</button>
       <button id="settings-open" type="button" hidden>Settings</button>
       <button id="auth-open" type="button">Login</button>
@@ -253,6 +256,14 @@
             <span>Location label</span>
             <input id="settings-location" maxlength="80" placeholder="The internet" />
           </label>
+          <label class="field">
+            <span>Profile headline</span>
+            <input id="settings-profile-headline" maxlength="120" placeholder="Collector, artist, editor..." />
+          </label>
+          <label class="field">
+            <span>Featured tags</span>
+            <input id="settings-featured-tags" placeholder="wallpapers, edits, memes" />
+          </label>
         </div>
         <label class="field">
           <span>Bio</span>
@@ -261,6 +272,9 @@
         <div class="toggle-row">
           <label><input id="settings-public-profile" type="checkbox" checked /> Public profile card</label>
           <label><input id="settings-show-liked-count" type="checkbox" checked /> Show like stats</label>
+          <label><input id="settings-show-collections" type="checkbox" checked /> Show collections</label>
+          <label><input id="settings-show-uploads" type="checkbox" checked /> Show recent uploads</label>
+          <label><input id="settings-show-friends" type="checkbox" checked /> Show friends</label>
         </div>
       </section>
       <section class="settings-section">
@@ -411,7 +425,55 @@
       <div class="modal-actions">
         <button id="upload-submit" class="primary" type="submit">Post</button>
       </div>
+      <div id="upload-progress-wrap" class="upload-progress-wrap" hidden>
+        <div class="upload-progress-track">
+          <div id="upload-progress-bar" class="upload-progress-bar"></div>
+        </div>
+        <div class="upload-progress-meta">
+          <span id="upload-progress-label">Preparing upload</span>
+          <strong id="upload-progress-percent">0%</strong>
+        </div>
+      </div>
     </form>
+  </dialog>
+
+  <dialog id="user-search-dialog" class="modal">
+    <div class="modal-shell wide">
+      <div class="modal-head">
+        <h2>Find Users</h2>
+        <button id="user-search-close" class="icon-button" type="button" aria-label="Close">X</button>
+      </div>
+      <label class="field">
+        <span>Search users</span>
+        <input id="user-search-input" type="search" placeholder="username, display name, profile tag" />
+      </label>
+      <div id="user-search-results" class="user-results"></div>
+    </div>
+  </dialog>
+
+  <dialog id="friends-dialog" class="modal">
+    <div class="modal-shell wide">
+      <div class="modal-head">
+        <h2>Friends</h2>
+        <button id="friends-close" class="icon-button" type="button" aria-label="Close">X</button>
+      </div>
+      <div class="tabs">
+        <button id="friend-tab-incoming" type="button">Requests</button>
+        <button id="friend-tab-list" type="button">Friends</button>
+      </div>
+      <div id="friend-requests-list" class="user-results"></div>
+      <div id="friends-list" class="user-results" hidden></div>
+    </div>
+  </dialog>
+
+  <dialog id="profile-dialog" class="modal profile-modal">
+    <div class="modal-shell profile-shell">
+      <div class="modal-head">
+        <h2 id="profile-dialog-title">Profile</h2>
+        <button id="profile-close" class="icon-button" type="button" aria-label="Close">X</button>
+      </div>
+      <div id="profile-view" class="profile-view"></div>
+    </div>
   </dialog>
 
   <dialog id="edit-media-dialog" class="modal">
