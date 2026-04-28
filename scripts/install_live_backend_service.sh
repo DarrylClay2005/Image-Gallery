@@ -21,12 +21,15 @@ cat > "${SERVICE_FILE}" <<EOF
 [Unit]
 Description=Image Gallery live backend and GitHub Pages tunnel
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/env bash -lc "cd '${ROOT_DIR}' && exec scripts/start_live_backend.sh 8788"
+WorkingDirectory=${ROOT_DIR}
+ExecStart=/usr/bin/env bash -lc 'cd "${ROOT_DIR}" && exec ./scripts/start_live_tunnel_service.sh 8788'
 Restart=always
-RestartSec=10
+RestartSec=15
+TimeoutStopSec=20
 
 [Install]
 WantedBy=default.target
@@ -34,6 +37,12 @@ EOF
 
 run_systemctl --user daemon-reload
 run_systemctl --user enable --now image-gallery-live-backend.service
+
+if command -v loginctl >/dev/null 2>&1; then
+  loginctl enable-linger "${USER}" >/dev/null 2>&1 || true
+elif command -v flatpak-spawn >/dev/null 2>&1; then
+  flatpak-spawn --host loginctl enable-linger "${USER}" >/dev/null 2>&1 || true
+fi
 
 echo "Installed ${SERVICE_FILE}"
 run_systemctl --user --no-pager status image-gallery-live-backend.service
