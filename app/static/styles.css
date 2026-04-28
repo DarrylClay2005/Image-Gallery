@@ -192,6 +192,11 @@ button:hover, .button-link:hover { border-color: var(--accent); }
 }
 
 .account-card p { margin: 4px 0 0; }
+.account-card button {
+  margin-top: 8px;
+  padding: 7px 10px;
+  font-size: 0.78rem;
+}
 
 .avatar {
   width: 48px;

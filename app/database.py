@@ -360,6 +360,20 @@ class GalleryDatabase:
                 )
                 return await self.get_user(row["id"])
 
+    async def issue_email_verification_token(self, user_id: int, token: str) -> dict[str, Any] | None:
+        token_hash = verification_token_hash(token)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE users
+                    SET email_verification_token_hash=%s, email_verification_sent_at=CURRENT_TIMESTAMP
+                    WHERE id=%s AND email IS NOT NULL AND email_verified_at IS NULL
+                    """,
+                    (token_hash, user_id),
+                )
+        return await self.get_user(user_id)
+
     async def authenticate_user(self, username: str, password: str) -> dict[str, Any] | None:
         username = normalize_username(username)
         async with self.pool.acquire() as conn:

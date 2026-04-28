@@ -23,13 +23,17 @@ def send_email(settings: Settings, to_email: str, subject: str, body: str) -> bo
     message["Subject"] = subject
     message.set_content(body)
 
-    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=20) as smtp:
-        if settings.smtp_use_tls:
-            smtp.starttls()
-        if settings.smtp_username:
-            smtp.login(settings.smtp_username, settings.smtp_password)
-        smtp.send_message(message)
-    return True
+    try:
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=20) as smtp:
+            if settings.smtp_use_tls:
+                smtp.starttls()
+            if settings.smtp_username:
+                smtp.login(settings.smtp_username, settings.smtp_password)
+            smtp.send_message(message)
+        return True
+    except Exception:
+        logger.exception("Could not send email to %s", to_email)
+        return False
 
 
 def send_verification_email(settings: Settings, to_email: str, verify_url: str) -> bool:

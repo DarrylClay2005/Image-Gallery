@@ -1,4 +1,5 @@
 import mimetypes
+import html
 import os
 import re
 import secrets
@@ -12,7 +13,7 @@ from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -160,6 +161,30 @@ def _public_url(request: Request, storage_path: str) -> str:
 
 def _verification_url(request: Request, token: str) -> str:
     return str(request.url_for("verify_email")).replace("http://", "https://") + f"?token={token}"
+
+
+def _wants_json(request: Request) -> bool:
+    accept = request.headers.get("accept", "")
+    return "application/json" in accept and "text/html" not in accept
+
+
+def _verification_page(title: str, message: str, *, ok: bool) -> HTMLResponse:
+    color = "#37c9a7" if ok else "#ff6b6b"
+    return HTMLResponse(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        f"<title>{html.escape(title)}</title>"
+        "<style>body{margin:0;min-height:100vh;display:grid;place-items:center;"
+        "font-family:Inter,system-ui,sans-serif;background:#10151f;color:#edf4ff}"
+        "main{width:min(520px,calc(100vw - 32px));padding:28px;border:1px solid #273244;"
+        "background:#151d2b;border-radius:8px}h1{margin:0 0 10px;font-size:1.5rem}"
+        "p{color:#aab6c8;line-height:1.5}.badge{display:inline-block;margin-bottom:16px;"
+        f"color:{color};font-weight:700}}a{{color:#7dd3fc}}</style></head><body><main>"
+        f"<span class=\"badge\">{'Verified' if ok else 'Needs Attention'}</span>"
+        f"<h1>{html.escape(title)}</h1><p>{html.escape(message)}</p>"
+        f"<p><a href=\"{html.escape(settings.pages_public_url)}\">Return to Image Gallery</a></p>"
+        "</main></body></html>"
+    )
 
 
 def _with_urls(request: Request, item: dict[str, Any] | None, adult_allowed: bool = False) -> dict[str, Any] | None:
@@ -346,15 +371,35 @@ async def register(payload: RegisterRequest, request: Request) -> dict[str, Any]
     verification_sent = False
     if user.get("email") and email_token:
         verification_sent = send_verification_email(settings, user["email"], _verification_url(request, email_token))
-    return {"user": _jsonable(user), "token": issue_token(settings.session_secret, user)}
+    return {"user": _jsonable(user), "token": issue_token(settings.session_secret, user), "email_verification_sent": verification_sent}
 
 
 @app.get("/api/auth/verify-email", name="verify_email")
-async def verify_email(token: str) -> dict[str, Any]:
+async def verify_email(request: Request, token: str):
     user = await db.verify_email_by_token(token)
     if not user:
-        raise HTTPException(status_code=400, detail="Invalid or expired verification link.")
-    return {"ok": True, "user": _jsonable(user)}
+        if _wants_json(request):
+            raise HTTPException(status_code=400, detail="Invalid or expired verification link.")
+        return _verification_page("Verification Link Expired", "That Image Gallery verification link is invalid or has already been used. Sign in and resend verification from your account.", ok=False)
+    if _wants_json(request):
+        return {"ok": True, "user": _jsonable(user)}
+    return _verification_page("Email Verified", f"{user.get('email') or 'Your email address'} is now verified for Image Gallery.", ok=True)
+
+
+@app.post("/api/auth/resend-verification")
+async def resend_verification(request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    user = await db.get_user(int(auth["id"]))
+    if not user:
+        raise HTTPException(status_code=404, detail="Account not found.")
+    if not user.get("email"):
+        raise HTTPException(status_code=400, detail="This account does not have an email address.")
+    if user.get("email_verified_at"):
+        return {"ok": True, "email_verification_sent": False, "already_verified": True}
+    email_token = secrets.token_urlsafe(32)
+    user = await db.issue_email_verification_token(int(auth["id"]), email_token)
+    verification_sent = bool(user and send_verification_email(settings, user["email"], _verification_url(request, email_token)))
+    return {"ok": verification_sent, "email_verification_sent": verification_sent, "already_verified": False}
 
 
 @app.post("/api/auth/login")

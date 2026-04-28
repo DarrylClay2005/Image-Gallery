@@ -92,9 +92,15 @@ function renderAuth() {
   $("account-card").hidden = !currentUser;
   if (currentUser) {
     $("account-name").textContent = currentUser.display_name || currentUser.username;
+    const emailNote = currentUser.email && !currentUser.email_verified
+      ? " Email verification is pending."
+      : currentUser.email_verified
+        ? " Email verified."
+        : "";
     $("account-bio").textContent = currentUser.age_verified
-      ? currentUser.bio || "Age verified. Your settings apply only to this account."
-      : currentUser.bio || "Verify age in settings to unlock 18+ posts.";
+      ? `${currentUser.bio || "Age verified. Your settings apply only to this account."}${emailNote}`
+      : `${currentUser.bio || "Verify age in settings to unlock 18+ posts."}${emailNote}`;
+    $("resend-email-verification").hidden = !currentUser.email || currentUser.email_verified;
     renderAvatar("account-avatar", currentUser);
   }
   applyAccountSettings();
@@ -613,6 +619,14 @@ async function submitAuth(event) {
     writeStore(USER_KEY, JSON.stringify(currentUser));
     renderAuth();
     await refreshMe();
+    if (registerMode && payload.email) {
+      setNotice(
+        "auth-error",
+        data.email_verification_sent
+          ? "Account created. Check your email for the verification link."
+          : "Account created, but the verification email could not be sent. You can resend it from your account card.",
+      );
+    }
     $("auth-dialog").close();
     await refreshAll();
   } catch (err) {
@@ -765,6 +779,27 @@ async function submitUpload(event) {
   }
 }
 
+async function resendEmailVerification() {
+  const button = $("resend-email-verification");
+  if (!currentUser || button.hidden) return;
+  button.disabled = true;
+  const originalText = button.textContent;
+  button.textContent = "Sending...";
+  try {
+    const data = await apiFetch("/api/auth/resend-verification", { method: "POST" });
+    $("account-bio").textContent = data.email_verification_sent
+      ? "Verification email sent. Check your inbox."
+      : data.already_verified
+        ? "Email already verified."
+        : "Verification email could not be sent.";
+  } catch (err) {
+    $("account-bio").textContent = err.message;
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
 function bindEvents() {
   $("auth-open").addEventListener("click", () => $("auth-dialog").showModal());
   $("logout").addEventListener("click", async () => {
@@ -777,6 +812,7 @@ function bindEvents() {
   });
   $("auth-toggle").addEventListener("click", () => setRegisterMode(!registerMode));
   $("auth-form").addEventListener("submit", submitAuth);
+  $("resend-email-verification").addEventListener("click", resendEmailVerification);
   $("surprise-open").addEventListener("click", openSurprise);
   $("collections-open").addEventListener("click", openCollectionsDialog);
   $("collections-close").addEventListener("click", () => $("collections-dialog").close());
