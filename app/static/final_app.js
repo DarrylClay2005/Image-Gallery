@@ -3,7 +3,7 @@ const REMOTE_MODE = window.location.hostname.endsWith("github.io");
 const CONFIG_FILE = "live-config.json";
 const TOKEN_KEY = "image_gallery_token";
 const USER_KEY = "image_gallery_user";
-const MAX_UPLOAD_BYTES = 250 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
 const DEFAULT_USER_SETTINGS = {
   theme_mode: "system",
   accent_color: "#37c9a7",
@@ -97,6 +97,36 @@ async function apiFetch(path, options = {}) {
     throw error;
   }
   return data;
+}
+
+async function apiBlobFetch(path, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  let response;
+  try {
+    response = await fetch(apiUrl(path), { ...options, headers });
+  } catch (err) {
+    const error = new Error(`Backend unreachable: ${err.message || err}`);
+    error.status = 0;
+    throw error;
+  }
+  if (!response.ok) {
+    let detail = "Request failed";
+    try {
+      const data = await response.json();
+      detail = data.detail || data.message || detail;
+    } catch (_err) {}
+    const error = new Error(detail);
+    error.status = response.status;
+    throw error;
+  }
+  return response;
+}
+
+function filenameFromDisposition(disposition, fallback = "download") {
+  const match = String(disposition || "").match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+  const raw = decodeURIComponent(match?.[1] || match?.[2] || fallback);
+  return raw.replace(/[\\/\0]/g, "_").slice(0, 180) || fallback;
 }
 
 function setNotice(id, message) {
@@ -445,6 +475,51 @@ async function copyAddress(id) {
   }
 }
 
+async function downloadMedia(id) {
+  const numericId = Number(id);
+  const item = mediaItems.find((entry) => Number(entry.id) === numericId) || activeDetail;
+  if (!item) return;
+  if (item.downloads_enabled === false) return alert("Downloads are disabled for this post.");
+  if (item.is_adult && (!currentUser || !currentUser.age_verified)) {
+    openAgeDialog("Verify your age before downloading this 18+ post.");
+    return;
+  }
+  try {
+    const response = await apiBlobFetch(`/api/media/${numericId}/download`);
+    const blob = await response.blob();
+    const fallback = item.original_filename || `${(item.title || "download").replace(/\s+/g, "_")}`;
+    const filename = filenameFromDisposition(response.headers.get("Content-Disposition"), fallback);
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1500);
+  } catch (err) {
+    if (err.status === 403 && item.is_adult) openAgeDialog(err.message);
+    else alert(err.message || "Download failed.");
+  }
+}
+
+function stopMediaPlayback(root = document) {
+  root.querySelectorAll("video, audio").forEach((media) => {
+    try {
+      media.pause();
+      media.currentTime = 0;
+      media.removeAttribute("src");
+      media.load();
+    } catch (_err) {}
+  });
+}
+
+function closeDetailDialog() {
+  const dialog = $("detail-dialog");
+  stopMediaPlayback(dialog);
+  if (dialog.open) dialog.close();
+}
+
 async function refreshMe() {
   if (!token) return;
   let data;
@@ -581,8 +656,8 @@ function renderMediaGrid() {
           <button type="button" data-bookmark="${item.id}">${item.bookmarked_by_me ? "Saved" : "Save"}</button>
           <button type="button" data-collect="${item.id}">Collect</button>
           <button type="button" data-copy="${item.id}" ${item.url ? "" : "disabled"}>Copy Address</button>
-          ${currentUser && Number(item.user_id) === Number(currentUser.id) ? `<button type="button" data-edit-media="${item.id}">Manage</button>` : ""}
-          ${item.download_url && item.downloads_enabled !== false ? `<a href="${item.download_url}" ${prefs.open_original_in_new_tab ? 'target="_blank" rel="noopener"' : ""}>Download</a>` : `<button type="button" data-age-gate>${item.downloads_enabled === false ? "No downloads" : "Download"}</button>`}
+          ${currentUser && Number(item.user_id) === Number(currentUser.id) ? `<button type="button" data-edit-media="${item.id}">Manage</button><button type="button" data-delete-media="${item.id}" class="danger-button">Delete</button>` : ""}
+          ${item.downloads_enabled !== false ? `<button type="button" data-download="${item.id}" class="button-link">Download</button>` : `<button type="button" disabled>No downloads</button>`}
         </div>
       </div>
     `;
@@ -601,6 +676,7 @@ async function openDetail(id) {
     }
     throw err;
   }
+  stopMediaPlayback($("detail-dialog"));
   activeDetail = data.media;
   const item = activeDetail;
   $("detail-title").innerHTML = `${adultBadge(item)}${escapeHtml(item.title)}`;
@@ -615,8 +691,9 @@ async function openDetail(id) {
   $("detail-tags").innerHTML = (item.tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
   $("detail-like").textContent = item.liked_by_me ? "Unlike" : "Like";
   $("detail-bookmark").textContent = item.bookmarked_by_me ? "Saved" : "Bookmark";
-  $("detail-download").href = item.download_url || "#";
-  $("detail-download").toggleAttribute("aria-disabled", !item.download_url);
+  $("detail-download").href = "#";
+  $("detail-download").dataset.download = item.id;
+  $("detail-download").toggleAttribute("aria-disabled", item.downloads_enabled === false);
   renderComments(data.comments || []);
   const commentForm = $("comment-form");
   if (commentForm) commentForm.hidden = item.comments_enabled === false && Number(item.user_id) !== Number(currentUser?.id);
@@ -833,7 +910,10 @@ async function editOwnMedia(id) {
   const downloadsEnabled = confirm("Allow downloads on this post? OK = yes, Cancel = no");
   const pinned = confirm("Pin this post to the top of your results? OK = yes, Cancel = no");
   const adult = confirm("Mark this post as 18+? OK = yes, Cancel = no");
-  const categoryId = Number(item.category_id || categories[0]?.id || 0);
+  const categoryOptions = categories.map((cat) => `${cat.id}: ${cat.name}`).join("\n");
+  const categoryRaw = prompt(`Category ID:\n${categoryOptions}`, item.category_id || categories[0]?.id || "");
+  if (categoryRaw === null) return;
+  const categoryId = Number(categoryRaw || item.category_id || categories[0]?.id || 0);
   const data = await apiFetch(`/api/media/${id}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -957,7 +1037,7 @@ async function submitUpload(event) {
   setNotice("upload-error", "");
   const file = $("upload-file").files[0];
   if (!file) return setNotice("upload-error", "Choose a file first.");
-  if (file.size > MAX_UPLOAD_BYTES) return setNotice("upload-error", "Uploads must be 250MB or smaller.");
+  if (file.size > MAX_UPLOAD_BYTES) return setNotice("upload-error", "Uploads must be 500MB or smaller.");
   const body = new FormData();
   body.set("file", file);
   body.set("title", $("upload-title").value);
@@ -1071,7 +1151,7 @@ function checkUploadReadiness() {
   if (file) {
     const allowed = /^(image|video)\//.test(file.type || "") || /\.(jpe?g|png|webp|gif|mp4|webm|mov|m4v|ogg)$/i.test(file.name || "");
     if (!allowed) message = "This file type may be rejected. Use an image, GIF, or video.";
-    else if (file.size > MAX_UPLOAD_BYTES) message = "This file is over 250MB and will be rejected.";
+    else if (file.size > MAX_UPLOAD_BYTES) message = "This file is over 500MB and will be rejected.";
     else if (!title) message = "Add a title before uploading.";
   }
   setNotice("upload-error", message);
@@ -1137,7 +1217,7 @@ function bindEvents() {
   $("upload-category").addEventListener("change", toggleNewCategory);
   $("upload-file").addEventListener("change", () => {
     const file = $("upload-file").files[0];
-    $("file-label").textContent = file ? `${file.name} - ${formatBytes(file.size)}` : "Choose image, GIF, or video under 250MB";
+    $("file-label").textContent = file ? `${file.name} - ${formatBytes(file.size)}` : "Choose image, GIF, or video under 500MB";
     checkUploadReadiness();
   });
   if ($("upload-title")) $("upload-title").addEventListener("input", checkUploadReadiness);
@@ -1151,8 +1231,12 @@ function bindEvents() {
     const copy = event.target.closest("[data-copy]");
     const manage = event.target.closest("[data-edit-media]");
     const ageGate = event.target.closest("[data-age-gate]");
+    const download = event.target.closest("[data-download]");
+    const del = event.target.closest("[data-delete-media]");
     if (open && !handleAdultOpen(open.dataset.open)) await openDetail(open.dataset.open);
     if (manage) await editOwnMedia(manage.dataset.editMedia);
+    if (del) await deleteOwnMedia(del.dataset.deleteMedia);
+    if (download) await downloadMedia(download.dataset.download);
     if (like) await toggleLike(like.dataset.like);
     if (bookmark) await toggleBookmark(bookmark.dataset.bookmark);
     if (collect) await openCollectionPicker(collect.dataset.collect);
@@ -1181,12 +1265,21 @@ function bindEvents() {
     const del = event.target.closest("[data-delete-comment]");
     if (del) await deleteComment(del.dataset.deleteComment);
   });
-  $("detail-close").addEventListener("click", () => $("detail-dialog").close());
+  $("detail-close").addEventListener("click", closeDetailDialog);
+  $("detail-dialog").addEventListener("cancel", () => stopMediaPlayback($("detail-dialog")));
+  $("detail-dialog").addEventListener("close", () => stopMediaPlayback($("detail-dialog")));
+  $("detail-dialog").addEventListener("click", (event) => {
+    if (event.target === $("detail-dialog")) closeDetailDialog();
+  });
   $("detail-like").addEventListener("click", () => activeDetail && toggleLike(activeDetail.id));
   $("detail-bookmark").addEventListener("click", () => activeDetail && toggleBookmark(activeDetail.id));
   $("detail-collect").addEventListener("click", () => activeDetail && openCollectionPicker(activeDetail.id));
   $("detail-report").addEventListener("click", () => activeDetail && openReport(activeDetail.id));
   $("detail-copy").addEventListener("click", () => activeDetail && copyAddress(activeDetail.id));
+  $("detail-download").addEventListener("click", async (event) => {
+    event.preventDefault();
+    if (activeDetail) await downloadMedia(activeDetail.id);
+  });
   $("comment-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!currentUser) return $("auth-dialog").showModal();

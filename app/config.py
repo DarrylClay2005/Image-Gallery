@@ -63,7 +63,7 @@ def load_settings() -> Settings:
         cors_allowed_origins=_env_csv("GALLERY_CORS_ALLOWED_ORIGINS"),
         pages_public_url=pages_url,
         uploads_dir=Path(_env("GALLERY_UPLOADS_DIR", str(ROOT_DIR / "uploads"))),
-        max_upload_bytes=int(_env("GALLERY_MAX_UPLOAD_BYTES", str(250 * 1024 * 1024))),
+        max_upload_bytes=int(_env("GALLERY_MAX_UPLOAD_BYTES", str(500 * 1024 * 1024))),
         smtp_host=_env("GALLERY_SMTP_HOST") or _env("SMTP_HOST"),
         smtp_port=int(_env("GALLERY_SMTP_PORT") or _env("SMTP_PORT") or "587"),
         smtp_username=_env("GALLERY_SMTP_USERNAME") or _env("SMTP_USERNAME"),

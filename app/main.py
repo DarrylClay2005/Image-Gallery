@@ -493,6 +493,10 @@ async def live_checks(request: Request) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     try:
         snapshot = await db.site_checks()
+        if int(snapshot.get("missing_db_files") or 0) > 0:
+            migrated = await db.migrate_legacy_media_files(limit=25)
+            if migrated.get("migrated"):
+                snapshot = await db.site_checks()
         checks.append({"id": "api", "label": "API reachable", "ok": True, "detail": "Backend responded."})
         checks.append({"id": "db", "label": "Database reachable", "ok": True, "detail": f"Schema {settings.db_schema} responded."})
         missing = int(snapshot.get("missing_db_files") or 0)
@@ -1069,7 +1073,8 @@ async def _adult_file_allowed(request: Request, media_id: int, access: str | Non
 
 
 async def _serve_media_content(media_id: int, request: Request, *, access: str | None, as_download: bool) -> Response:
-    viewer_id = _user_id(_auth_optional(request))
+    auth = _auth_optional(request)
+    viewer_id = _user_id(auth)
     item = await db.get_media(media_id, viewer_id)
     if not item or item.get("deleted_at"):
         raise HTTPException(status_code=404, detail="Media not found.")
@@ -1078,8 +1083,10 @@ async def _serve_media_content(media_id: int, request: Request, *, access: str |
         raise HTTPException(status_code=403, detail="This post is private.")
     if as_download and not item.get("downloads_enabled", True) and not owner:
         raise HTTPException(status_code=403, detail="Downloads are disabled for this post.")
-    if item.get("is_adult") and not await _adult_file_allowed(request, media_id, access):
-        raise HTTPException(status_code=403, detail="Age verification required for this 18+ post.")
+    if item.get("is_adult"):
+        adult_ok = await _viewer_can_open_adult(request) if as_download else await _adult_file_allowed(request, media_id, access)
+        if not adult_ok:
+            raise HTTPException(status_code=403, detail="Age verification required for this 18+ post.")
 
     file_row = await db.get_media_file(media_id)
     if file_row:

@@ -1,6 +1,8 @@
 import json
 import re
 import hashlib
+import mimetypes
+from pathlib import Path
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -1451,6 +1453,66 @@ class GalleryDatabase:
                     (media_id, user_id),
                 )
                 return await cur.fetchone()
+
+    async def migrate_legacy_media_files(self, limit: int = 25) -> dict[str, Any]:
+        """Copy old disk-backed uploads into media_files and link media_items."""
+        migrated = 0
+        missing = 0
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT id, user_id, storage_path, mime_type, original_filename, media_kind
+                    FROM media_items
+                    WHERE deleted_at IS NULL AND (media_file_id IS NULL OR media_file_id=0)
+                    ORDER BY id ASC
+                    LIMIT %s
+                    """,
+                    (max(1, min(int(limit or 25), 100)),),
+                )
+                rows = list(await cur.fetchall())
+                uploads_root = Path(self.settings.uploads_dir).resolve()
+                for row in rows:
+                    raw = str(row.get("storage_path") or "")
+                    if raw.startswith("db://"):
+                        missing += 1
+                        continue
+                    raw = raw.replace("\\", "/").lstrip("/")
+                    if raw.startswith("uploads/"):
+                        raw = raw.split("/", 1)[1]
+                    path = (uploads_root / raw).resolve()
+                    try:
+                        path.relative_to(uploads_root)
+                    except ValueError:
+                        missing += 1
+                        continue
+                    if not path.is_file():
+                        missing += 1
+                        continue
+                    content = path.read_bytes()
+                    sha256 = hashlib.sha256(content).hexdigest()
+                    mime_type = (row.get("mime_type") or mimetypes.guess_type(str(path))[0] or "application/octet-stream")[:120]
+                    media_kind = row.get("media_kind") if row.get("media_kind") in {"image", "video"} else ("video" if mime_type.startswith("video/") else "image")
+                    original = (row.get("original_filename") or path.name)[:255]
+                    await cur.execute("SELECT id FROM media_files WHERE sha256=%s", (sha256,))
+                    file_row = await cur.fetchone()
+                    if file_row:
+                        file_id = int(file_row["id"])
+                    else:
+                        await cur.execute(
+                            """
+                            INSERT INTO media_files (sha256, mime_type, original_filename, media_kind, file_size, content, created_by)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            """,
+                            (sha256, mime_type, original, media_kind, len(content), content, row.get("user_id")),
+                        )
+                        file_id = int(cur.lastrowid)
+                    await cur.execute(
+                        "UPDATE media_items SET media_file_id=%s, content_sha256=%s, file_size=%s, storage_path=%s WHERE id=%s",
+                        (file_id, sha256, len(content), f"db://media/{file_id}", row["id"]),
+                    )
+                    migrated += 1
+        return {"migrated": migrated, "missing": missing}
 
 
     async def site_checks(self) -> dict[str, Any]:
