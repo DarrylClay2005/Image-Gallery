@@ -3,9 +3,11 @@ const REMOTE_MODE = window.location.hostname.endsWith("github.io");
 const CONFIG_FILE = "live-config.json";
 const TOKEN_KEY = "image_gallery_token";
 const USER_KEY = "image_gallery_user";
+const GALLERY_VIEW_KEY = "image_gallery_view";
 const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
 const GALLERY_PAGE_SIZE = 15;
 const LIVE_CHECK_INTERVAL_MS = 15000;
+const SEARCH_DEBOUNCE_MS = 250;
 const DEFAULT_USER_SETTINGS = {
   theme_mode: "system",
   accent_color: "#37c9a7",
@@ -47,6 +49,8 @@ let registerMode = false;
 let uploadInFlight = false;
 let uploadStartedAt = 0;
 let activeProfileUsername = "";
+let galleryViewRestored = false;
+let toastTimer = 0;
 const revealedAdultMedia = new Set();
 
 const $ = (id) => document.getElementById(id);
@@ -76,6 +80,16 @@ function setDisabledIfPresent(id, disabled) {
   if (el) el.disabled = Boolean(disabled);
 }
 
+function showToast(message, kind = "info") {
+  const region = safeEl("toast-region");
+  if (!region) return;
+  region.textContent = message || "";
+  region.dataset.kind = kind;
+  region.hidden = !message;
+  clearTimeout(toastTimer);
+  if (message) toastTimer = setTimeout(() => { region.hidden = true; }, 3200);
+}
+
 
 function readStore(key) {
   try { return localStorage.getItem(key) || ""; } catch (_err) { return ""; }
@@ -90,6 +104,23 @@ function writeStore(key, value) {
 
 function readJsonStore(key) {
   try { return JSON.parse(readStore(key) || "null"); } catch (_err) { return null; }
+}
+
+async function copyText(value, successMessage = "Copied.") {
+  const text = String(value || "");
+  if (!text) return false;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (_err) {
+    const temp = document.createElement("input");
+    temp.value = text;
+    document.body.appendChild(temp);
+    temp.select();
+    document.execCommand("copy");
+    temp.remove();
+  }
+  showToast(successMessage, "success");
+  return true;
 }
 
 function apiUrl(path) {
@@ -546,16 +577,7 @@ async function copyAddress(id) {
   const item = mediaItems.find((entry) => Number(entry.id) === numericId) || activeDetail;
   const url = item?.url || (item?.id ? apiUrl(`/api/media/${item.id}/file`) : "");
   if (!url) return;
-  try {
-    await navigator.clipboard.writeText(url);
-  } catch (_err) {
-    const temp = document.createElement("input");
-    temp.value = url;
-    document.body.appendChild(temp);
-    temp.select();
-    document.execCommand("copy");
-    temp.remove();
-  }
+  await copyText(url, "Media address copied.");
 }
 
 async function downloadMedia(id) {
@@ -579,10 +601,11 @@ async function downloadMedia(id) {
     document.body.appendChild(link);
     link.click();
     link.remove();
+    showToast("Download started.", "success");
     setTimeout(() => URL.revokeObjectURL(objectUrl), 1500);
   } catch (err) {
     if (err.status === 403 && item.is_adult) openAgeDialog(err.message);
-    else alert(err.message || "Download failed.");
+    else showToast(err.message || "Download failed.", "error");
   }
 }
 
@@ -659,6 +682,7 @@ async function initApiOrigin() {
 async function refreshAll() {
   await runLiveChecks({ silent: true }).catch(() => {});
   await Promise.all([loadCategories(), isDesmondUser() ? loadStats() : Promise.resolve(), loadTags()]);
+  if (!galleryViewRestored) restoreGalleryViewState();
   await loadMedia(galleryMode === "main" ? galleryPage : 1);
 }
 
@@ -712,6 +736,76 @@ function galleryFiltersActive() {
   );
 }
 
+function galleryViewState() {
+  return {
+    search: safeEl("search")?.value?.trim() || "",
+    kind: safeEl("kind-filter")?.value || "",
+    category: safeEl("category-filter")?.value || "",
+    sort: safeEl("sort-filter")?.value || "new",
+    page: galleryPage,
+  };
+}
+
+function saveGalleryViewState() {
+  writeStore(GALLERY_VIEW_KEY, JSON.stringify(galleryViewState()));
+}
+
+function restoreGalleryViewState() {
+  galleryViewRestored = true;
+  const params = new URLSearchParams(location.search || "");
+  const stored = readJsonStore(GALLERY_VIEW_KEY) || {};
+  const state = {
+    ...stored,
+    search: params.get("q") ?? stored.search,
+    kind: params.get("kind") ?? stored.kind,
+    category: params.get("category") ?? stored.category,
+    sort: params.get("sort") ?? stored.sort,
+    page: params.get("page") ?? stored.page,
+  };
+  if (safeEl("search")) $("search").value = state.search || "";
+  if (safeEl("kind-filter")) $("kind-filter").value = state.kind || "";
+  if (safeEl("category-filter")) $("category-filter").value = state.category || "";
+  if (safeEl("sort-filter")) $("sort-filter").value = state.sort || userSettings().default_sort || "new";
+  galleryPage = Math.max(1, Number(state.page || 1));
+}
+
+function clearGalleryFilters() {
+  if (safeEl("search")) $("search").value = "";
+  if (safeEl("kind-filter")) $("kind-filter").value = "";
+  if (safeEl("category-filter")) $("category-filter").value = "";
+  if (safeEl("sort-filter")) $("sort-filter").value = "new";
+  galleryPage = 1;
+  saveGalleryViewState();
+  loadMedia(1, { scrollToTop: true });
+}
+
+function renderActiveFilters() {
+  const wrap = safeEl("active-filters");
+  if (!wrap) return;
+  const state = galleryViewState();
+  const category = categories.find((item) => String(item.id) === String(state.category));
+  const chips = [];
+  if (state.search) chips.push(["search", `Search: ${state.search}`]);
+  if (state.kind) chips.push(["kind", `Type: ${state.kind === "image" ? "Images/GIFs" : "Videos"}`]);
+  if (state.category) chips.push(["category", `Category: ${category?.name || state.category}`]);
+  if (state.sort && state.sort !== "new") chips.push(["sort", `Sort: ${$("sort-filter").selectedOptions?.[0]?.textContent || state.sort}`]);
+  wrap.hidden = chips.length === 0;
+  wrap.innerHTML = chips.map(([key, label]) => `<button type="button" data-clear-filter="${key}">${escapeHtml(label)} <span aria-hidden="true">x</span></button>`).join("")
+    + (chips.length ? `<button type="button" data-clear-filter="all" class="clear-all">Clear All</button>` : "");
+}
+
+async function shareCurrentView() {
+  const params = new URLSearchParams();
+  const state = galleryViewState();
+  if (state.search) params.set("q", state.search);
+  if (state.kind) params.set("kind", state.kind);
+  if (state.category) params.set("category", state.category);
+  if (state.sort && state.sort !== "new") params.set("sort", state.sort);
+  if (state.page > 1) params.set("page", String(state.page));
+  const url = `${location.origin}${location.pathname}${params.toString() ? `?${params}` : ""}`;
+  await copyText(url, "Current gallery view copied.");
+}
+
 function setEmptyState(title, message, visible = true) {
   setTextIfPresent("empty-title", title);
   setTextIfPresent("empty-message", message);
@@ -731,6 +825,8 @@ function updateGalleryPagination() {
 async function loadMedia(page = galleryPage, { scrollToTop = false } = {}) {
   galleryMode = "main";
   galleryPage = Math.max(1, Number(page) || 1);
+  saveGalleryViewState();
+  renderActiveFilters();
   galleryLoading = true;
   setTextIfPresent("result-count", `Loading page ${galleryPage}`);
   showIfPresent("empty-state", false);
@@ -771,6 +867,8 @@ function focusGalleryOnNewestUploads() {
   if (category) category.value = "";
   if (sort) sort.value = "new";
   galleryPage = 1;
+  saveGalleryViewState();
+  renderActiveFilters();
 }
 
 function renderMediaGrid() {
@@ -800,6 +898,7 @@ function renderMediaGrid() {
   } else {
     showIfPresent("empty-state", false);
   }
+  renderActiveFilters();
   updateGalleryPagination();
   for (const item of mediaItems) {
     const card = document.createElement("article");
@@ -869,10 +968,29 @@ async function openDetail(id) {
   $("detail-download").href = "#";
   $("detail-download").dataset.download = item.id;
   $("detail-download").toggleAttribute("aria-disabled", item.downloads_enabled === false);
+  updateDetailNavButtons();
   renderComments(data.comments || []);
   const commentForm = $("comment-form");
   if (commentForm) commentForm.hidden = item.comments_enabled === false && Number(item.user_id) !== Number(currentUser?.id);
   if (!$("detail-dialog").open) $("detail-dialog").showModal();
+}
+
+function currentDetailIndex() {
+  if (!activeDetail) return -1;
+  return mediaItems.findIndex((entry) => Number(entry.id) === Number(activeDetail.id));
+}
+
+function updateDetailNavButtons() {
+  const index = currentDetailIndex();
+  setDisabledIfPresent("detail-prev", index <= 0);
+  setDisabledIfPresent("detail-next", index < 0 || index >= mediaItems.length - 1);
+}
+
+async function openAdjacentDetail(direction) {
+  const index = currentDetailIndex();
+  const next = mediaItems[index + direction];
+  if (!next) return;
+  if (!handleAdultOpen(next.id)) await openDetail(next.id);
 }
 
 function renderComments(comments) {
@@ -914,6 +1032,7 @@ async function toggleBookmark(id, bookmarked = null) {
   if (activeDetail && Number(activeDetail.id) === Number(id)) {
     $("detail-bookmark").textContent = updated.bookmarked_by_me ? "Saved" : "Bookmark";
   }
+  showToast(updated.bookmarked_by_me ? "Saved to bookmarks." : "Removed from bookmarks.", "success");
 }
 
 async function toggleLike(id, liked = null) {
@@ -933,6 +1052,7 @@ async function toggleLike(id, liked = null) {
     $("detail-like").textContent = updated.liked_by_me ? "Unlike" : "Like";
     $("detail-meta").textContent = `${updated.category_name} by ${updated.display_name || updated.username} - ${formatBytes(updated.file_size)} - ${updated.like_count || 0} likes`;
   }
+  showToast(updated.liked_by_me ? "Liked." : "Like removed.", "success");
   if (isDesmondUser()) await loadStats().catch(() => {});
 }
 
@@ -1037,6 +1157,7 @@ async function addToCollection(event) {
       body: JSON.stringify({ media_id: Number(selectedCollectionMediaId), saved: true }),
     });
     $("collection-picker-dialog").close();
+    showToast("Added to collection.", "success");
   } catch (err) {
     setNotice("collection-picker-error", err.message);
   }
@@ -1476,6 +1597,25 @@ function resetUploadProgress() {
   }
 }
 
+function titleFromFilename(filename) {
+  return String(filename || "upload")
+    .replace(/\.[^.]+$/, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+    .slice(0, 160);
+}
+
+function updateUploadFileSummary() {
+  const file = safeEl("upload-file")?.files?.[0];
+  setTextIfPresent("file-label", file ? `${file.name} - ${formatBytes(file.size)}` : "Choose image, GIF, or video under 500MB");
+  setTextIfPresent("upload-file-summary", file ? `${file.type || "Unknown type"} · ${formatBytes(file.size)} · ${file.name}` : "No file selected.");
+  const title = safeEl("upload-title");
+  if (file && title && !title.value.trim()) title.value = titleFromFilename(file.name);
+  checkUploadReadiness();
+}
+
 function openSettingsPanel() {
   if (!currentUser) return safeEl("auth-dialog")?.showModal();
   fillSettingsForm();
@@ -1527,7 +1667,7 @@ async function submitUpload(event) {
       submit.textContent = "Uploading...";
     }
     setUploadProgress(0, "Starting upload");
-    await apiUpload("/api/media", body, ({ loaded, total, percent }) => {
+    const uploaded = await apiUpload("/api/media", body, ({ loaded, total, percent }) => {
       const seconds = Math.max(1, Math.round((Date.now() - uploadStartedAt) / 1000));
       setUploadProgress(percent, `${formatBytes(loaded)} of ${formatBytes(total)} uploaded in ${seconds}s`);
     });
@@ -1536,8 +1676,12 @@ async function submitUpload(event) {
     closeUploadDialog();
     focusGalleryOnNewestUploads();
     await refreshAll();
+    const uploadedId = uploaded?.media?.id;
+    if (uploadedId && confirm("Upload saved. Open it now?")) await openDetail(uploadedId);
+    else showToast("Upload saved.", "success");
   } catch (err) {
     setNotice("upload-error", err.message);
+    showToast(err.message || "Upload failed.", "error");
   } finally {
     uploadInFlight = false;
     resetUploadProgress();
@@ -1653,9 +1797,66 @@ function checkUploadReadiness() {
   setDisabledIfPresent("upload-submit", Boolean(message) || uploadInFlight);
 }
 
+function showKeyboardShortcuts() {
+  alert([
+    "Keyboard shortcuts",
+    "/ - focus search",
+    "U - upload",
+    "R - refresh current view",
+    "S - share current view",
+    "Arrow Left/Right - previous/next media or page",
+    "Escape - close the open dialog",
+  ].join("\n"));
+}
+
+function closeTopDialog() {
+  const dialogs = Array.from(document.querySelectorAll("dialog[open]"));
+  const dialog = dialogs.at(-1);
+  if (!dialog) return false;
+  if (dialog.id === "detail-dialog") closeDetailDialog();
+  else dialog.close();
+  return true;
+}
+
+function bindKeyboardShortcuts() {
+  document.addEventListener("keydown", async (event) => {
+    const target = event.target;
+    const isTyping = ["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName) || target?.isContentEditable;
+    if (event.key === "Escape" && closeTopDialog()) return;
+    if (isTyping && event.key !== "Escape") return;
+    if (event.key === "/") {
+      event.preventDefault();
+      safeEl("search")?.focus();
+    } else if (event.key.toLowerCase() === "u") {
+      event.preventDefault();
+      currentUser ? $("upload-dialog").showModal() : $("auth-dialog").showModal();
+    } else if (event.key.toLowerCase() === "r") {
+      event.preventDefault();
+      await refreshAll();
+      showToast("Gallery refreshed.", "success");
+    } else if (event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      await shareCurrentView();
+    } else if (event.key === "ArrowLeft") {
+      if (safeEl("detail-dialog")?.open) await openAdjacentDetail(-1);
+      else if (galleryPage > 1) await loadCurrentGalleryPage(galleryPage - 1, { scrollToTop: true });
+    } else if (event.key === "ArrowRight") {
+      if (safeEl("detail-dialog")?.open) await openAdjacentDetail(1);
+      else if (galleryHasNext) await loadCurrentGalleryPage(galleryPage + 1, { scrollToTop: true });
+    }
+  });
+}
+
+function updateBackToTopVisibility() {
+  showIfPresent("back-to-top", window.scrollY > 520);
+}
+
 function bindEvents() {
   ensureUploadControlFields();
   ensureLiveControlButtons();
+  bindKeyboardShortcuts();
+  window.addEventListener("scroll", updateBackToTopVisibility, { passive: true });
+  on("back-to-top", "click", () => window.scrollTo({ top: 0, behavior: userSettings().reduce_motion ? "auto" : "smooth" }));
   document.addEventListener("error", (event) => {
     const target = event.target;
     if (target?.tagName === "IMG") {
@@ -1681,6 +1882,8 @@ function bindEvents() {
   $("settings-email-save").addEventListener("click", saveEmailAndSendCode);
   $("settings-email-verify").addEventListener("click", verifyEmailCode);
   $("surprise-open").addEventListener("click", openSurprise);
+  on("share-view", "click", shareCurrentView);
+  on("shortcuts-open", "click", showKeyboardShortcuts);
   on("users-open", "click", openUserSearchDialog);
   on("profile-open", "click", () => currentUser && openProfile(currentUser.username));
   on("user-search-close", "click", () => $("user-search-dialog").close());
@@ -1712,8 +1915,7 @@ function bindEvents() {
   $("report-form").addEventListener("submit", submitReport);
   if ($("report-close")) $("report-close").addEventListener("click", () => $("report-dialog").close());
   $("clear-tag").addEventListener("click", () => {
-    $("search").value = "";
-    loadMedia(1);
+    clearGalleryFilters();
   });
   $("tag-cloud").addEventListener("click", (event) => {
     const tagButton = event.target.closest("[data-tag]");
@@ -1735,16 +1937,48 @@ function bindEvents() {
   on("edit-media-close", "click", () => $("edit-media-dialog").close());
   on("edit-media-form", "submit", submitEditMedia);
   $("upload-category").addEventListener("change", toggleNewCategory);
-  $("upload-file").addEventListener("change", () => {
-    const file = $("upload-file").files[0];
-    $("file-label").textContent = file ? `${file.name} - ${formatBytes(file.size)}` : "Choose image, GIF, or video under 500MB";
-    checkUploadReadiness();
-  });
+  $("upload-file").addEventListener("change", updateUploadFileSummary);
+  const dropZone = document.querySelector(".drop-zone");
+  if (dropZone) {
+    ["dragenter", "dragover"].forEach((eventName) => dropZone.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      dropZone.classList.add("is-dragging");
+    }));
+    dropZone.addEventListener("dragleave", () => {
+      dropZone.classList.remove("is-dragging");
+    });
+    dropZone.addEventListener("drop", (event) => {
+      event.preventDefault();
+      dropZone.classList.remove("is-dragging");
+      const files = event.dataTransfer?.files;
+      const input = safeEl("upload-file");
+      if (input && files?.length) {
+        input.files = files;
+        updateUploadFileSummary();
+      }
+    });
+  }
   if ($("upload-title")) $("upload-title").addEventListener("input", checkUploadReadiness);
   $("refresh").addEventListener("click", refreshAll);
   on("gallery-prev", "click", () => loadCurrentGalleryPage(galleryPage - 1, { scrollToTop: true }));
   on("gallery-next", "click", () => loadCurrentGalleryPage(galleryPage + 1, { scrollToTop: true }));
-  ["search", "kind-filter", "category-filter", "sort-filter"].forEach((id) => $(id).addEventListener("input", () => loadMedia(1)));
+  on("active-filters", "click", (event) => {
+    const chip = event.target.closest("[data-clear-filter]");
+    if (!chip) return;
+    const key = chip.dataset.clearFilter;
+    if (key === "all") return clearGalleryFilters();
+    if (key === "search") $("search").value = "";
+    if (key === "kind") $("kind-filter").value = "";
+    if (key === "category") $("category-filter").value = "";
+    if (key === "sort") $("sort-filter").value = "new";
+    loadMedia(1);
+  });
+  ["kind-filter", "category-filter", "sort-filter"].forEach((id) => $(id).addEventListener("input", () => loadMedia(1)));
+  $("search").addEventListener("input", () => {
+    clearTimeout(window.__gallerySearchTimer);
+    renderActiveFilters();
+    window.__gallerySearchTimer = setTimeout(() => loadMedia(1), SEARCH_DEBOUNCE_MS);
+  });
   $("gallery-grid").addEventListener("click", async (event) => {
     const open = event.target.closest("[data-open]");
     const profile = event.target.closest("[data-profile]");
@@ -1830,6 +2064,8 @@ function bindEvents() {
     if (del) await deleteComment(del.dataset.deleteComment);
   });
   $("detail-close").addEventListener("click", closeDetailDialog);
+  on("detail-prev", "click", () => openAdjacentDetail(-1));
+  on("detail-next", "click", () => openAdjacentDetail(1));
   $("detail-dialog").addEventListener("cancel", () => stopMediaPlayback($("detail-dialog")));
   $("detail-dialog").addEventListener("close", () => stopMediaPlayback($("detail-dialog")));
   $("detail-dialog").addEventListener("click", (event) => {

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#101318" />
   <title>Image Gallery</title>
-  <link rel="stylesheet" href="./app/static/styles.css?v=20260428-gallery-pages-live-checks" />
+  <link rel="stylesheet" href="./app/static/styles.css?v=20260428-qol-pass" />
 </head>
 <body>
   <header class="topbar">
@@ -91,8 +91,13 @@
           <h1>Fresh Drops</h1>
           <p id="result-count" class="muted">Loading gallery</p>
         </div>
-        <button id="refresh" type="button">Refresh</button>
+        <div class="content-actions">
+          <button id="share-view" type="button">Share View</button>
+          <button id="shortcuts-open" type="button">Shortcuts</button>
+          <button id="refresh" type="button">Refresh</button>
+        </div>
       </div>
+      <div id="active-filters" class="active-filters" hidden></div>
       <div id="gallery-grid" class="gallery-grid"></div>
       <nav id="gallery-pagination" class="gallery-pagination" aria-label="Gallery pages" hidden>
         <button id="gallery-prev" type="button">Previous</button>
@@ -430,6 +435,7 @@
       <div class="modal-actions">
         <button id="upload-submit" class="primary" type="submit">Post</button>
       </div>
+      <p id="upload-file-summary" class="muted upload-file-summary">No file selected.</p>
       <div id="upload-progress-wrap" class="upload-progress-wrap" hidden>
         <div class="upload-progress-track">
           <div id="upload-progress-bar" class="upload-progress-bar"></div>
@@ -531,7 +537,11 @@
     <div class="modal-shell detail-shell">
       <div class="modal-head">
         <h2 id="detail-title">Media</h2>
-        <button id="detail-close" class="icon-button" type="button" aria-label="Close">X</button>
+        <div class="detail-head-actions">
+          <button id="detail-prev" type="button">Previous</button>
+          <button id="detail-next" type="button">Next</button>
+          <button id="detail-close" class="icon-button" type="button" aria-label="Close">X</button>
+        </div>
       </div>
       <div class="detail-grid">
         <div id="detail-media" class="detail-media"></div>
@@ -560,6 +570,8 @@
     </div>
   </dialog>
 
-  <script src="./app/static/final_app.js?v=20260428-gallery-pages-live-checks"></script>
+  <button id="back-to-top" class="back-to-top" type="button" hidden>Top</button>
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true" hidden></div>
+  <script src="./app/static/final_app.js?v=20260428-qol-pass"></script>
 </body>
 </html>
