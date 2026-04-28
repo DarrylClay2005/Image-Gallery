@@ -931,13 +931,13 @@ async def upload_media(
     _rate_limit(f"upload:{auth['id']}", limit=60, window_seconds=3600)
     uploaded = await _read_validated_upload(file, settings.max_upload_bytes)
     packet_limit = await db.get_max_allowed_packet()
-    if packet_limit and uploaded["file_size"] + (2 * 1024 * 1024) > packet_limit:
+    if packet_limit and uploaded["file_size"] + (16 * 1024 * 1024) > packet_limit:
         raise HTTPException(
             status_code=413,
             detail=(
                 f"This upload is {uploaded['file_size'] // (1024 * 1024)}MB, but MariaDB max_allowed_packet is "
-                f"only {packet_limit // (1024 * 1024)}MB. Raise MariaDB max_allowed_packet to at least 512M/1G "
-                "or use smaller files."
+                f"only {packet_limit // (1024 * 1024)}MB. For 500MB uploads, set MariaDB max_allowed_packet to "
+                "512M / 536870912 bytes minimum, then restart MariaDB and this gallery container."
             ),
         )
     media_kind = uploaded["media_kind"]
@@ -949,7 +949,7 @@ async def upload_media(
                 await db.reconnect()
             except Exception:
                 pass
-            raise HTTPException(status_code=503, detail="Database connection reset during upload. Try again; if this repeats, raise MariaDB max_allowed_packet.") from None
+            raise HTTPException(status_code=503, detail="Database connection reset during upload. Set MariaDB max_allowed_packet to 512M / 536870912 bytes, restart MariaDB, then restart this gallery container.") from None
         raise
     if media_file.get("duplicate"):
         raise HTTPException(status_code=409, detail="That exact file is already stored in the gallery database.")

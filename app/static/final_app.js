@@ -1027,6 +1027,22 @@ function ensureUploadControlFields() {
   else form.appendChild(wrapper);
 }
 
+function closeUploadDialog() {
+  setNotice("upload-error", "");
+  const form = safeEl("upload-form");
+  if (form) form.reset();
+  setTextIfPresent("file-label", "Choose image, GIF, or video under 500MB");
+  const dialog = safeEl("upload-dialog");
+  if (dialog?.open) dialog.close();
+  checkUploadReadiness();
+}
+
+function openAccountPanel() {
+  if (!currentUser) return safeEl("auth-dialog")?.showModal();
+  fillSettingsForm();
+  safeEl("settings-dialog")?.showModal();
+}
+
 async function submitUpload(event) {
   event.preventDefault();
   if (!currentUser) {
@@ -1055,12 +1071,14 @@ async function submitUpload(event) {
     body.set("category_kind", $("new-category-kind").value);
   }
   try {
+    setDisabledIfPresent("upload-submit", true);
     await apiFetch("/api/media", { method: "POST", body });
-    $("upload-form").reset();
-    $("upload-dialog").close();
+    closeUploadDialog();
     await refreshAll();
   } catch (err) {
     setNotice("upload-error", err.message);
+  } finally {
+    checkUploadReadiness();
   }
 }
 
@@ -1177,7 +1195,8 @@ function bindEvents() {
       target.closest(".media-preview")?.classList.add("preview-missing");
     }
   }, true);
-  $("auth-open").addEventListener("click", () => $("auth-dialog").showModal());
+  $("auth-open").addEventListener("click", openAccountPanel);
+  if ($("auth-close")) $("auth-close").addEventListener("click", () => $("auth-dialog").close());
   $("logout").addEventListener("click", async () => {
     token = "";
     currentUser = null;
@@ -1197,11 +1216,14 @@ function bindEvents() {
   on("live-checks-open", "click", () => runLiveChecks({ silent: false }));
   $("collections-open").addEventListener("click", openCollectionsDialog);
   $("collections-close").addEventListener("click", () => $("collections-dialog").close());
+  if ($("collection-picker-close")) $("collection-picker-close").addEventListener("click", () => $("collection-picker-dialog").close());
   $("collection-form").addEventListener("submit", createCollection);
   $("collection-picker-form").addEventListener("submit", addToCollection);
   $("studio-open").addEventListener("click", openStudio);
   $("studio-close").addEventListener("click", () => $("studio-dialog").close());
+  if ($("settings-close")) $("settings-close").addEventListener("click", () => $("settings-dialog").close());
   $("report-form").addEventListener("submit", submitReport);
+  if ($("report-close")) $("report-close").addEventListener("click", () => $("report-dialog").close());
   $("clear-tag").addEventListener("click", () => {
     $("search").value = "";
     loadMedia();
@@ -1222,6 +1244,7 @@ function bindEvents() {
   $("age-close").addEventListener("click", () => $("age-dialog").close());
   $("avatar-save").addEventListener("click", saveAvatar);
   $("upload-open").addEventListener("click", () => currentUser ? $("upload-dialog").showModal() : $("auth-dialog").showModal());
+  if ($("upload-close")) $("upload-close").addEventListener("click", closeUploadDialog);
   $("upload-form").addEventListener("submit", submitUpload);
   $("upload-category").addEventListener("change", toggleNewCategory);
   $("upload-file").addEventListener("change", () => {

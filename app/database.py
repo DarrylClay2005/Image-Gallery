@@ -1,4 +1,5 @@
 import json
+import logging
 import asyncio
 import re
 import hashlib
@@ -18,6 +19,7 @@ SLUG_RE = re.compile(r"[^a-z0-9]+")
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{3,40}$")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 MEDIA_KINDS = {"image", "video", "mixed"}
+log = logging.getLogger(__name__)
 DEFAULT_USER_SETTINGS = {
     "theme_mode": "system",
     "accent_color": "#37c9a7",
@@ -102,6 +104,7 @@ class GalleryDatabase:
 
     async def connect(self) -> None:
         await self._ensure_schema()
+        await self.ensure_packet_limit()
         self.pool = await aiomysql.create_pool(
             host=self.settings.db_host,
             port=self.settings.db_port,
@@ -132,6 +135,33 @@ class GalleryDatabase:
                 await cur.execute("SHOW VARIABLES LIKE 'max_allowed_packet'")
                 row = await cur.fetchone() or {}
                 return int(row.get("Value") or row.get("value") or 0)
+
+    async def ensure_packet_limit(self) -> None:
+        """Best-effort MariaDB packet bump for 500MB uploads."""
+        required = int(getattr(self.settings, "required_db_packet_bytes", 512 * 1024 * 1024) or 0)
+        if required <= 0:
+            return
+        conn = await aiomysql.connect(
+            host=self.settings.db_host,
+            port=self.settings.db_port,
+            user=self.settings.db_user,
+            password=self.settings.db_password,
+            autocommit=True,
+        )
+        try:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SHOW GLOBAL VARIABLES LIKE 'max_allowed_packet'")
+                row = await cur.fetchone() or {}
+                current = int(row.get("Value") or row.get("value") or 0)
+                if current >= required:
+                    return
+                try:
+                    await cur.execute(f"SET GLOBAL max_allowed_packet={required}")
+                    log.warning("Raised MariaDB max_allowed_packet from %s to %s for gallery uploads.", current, required)
+                except Exception as exc:
+                    log.warning("Could not auto-raise MariaDB max_allowed_packet from %s to %s: %s", current, required, exc)
+        finally:
+            conn.close()
 
     async def _ensure_schema(self) -> None:
         conn = await aiomysql.connect(

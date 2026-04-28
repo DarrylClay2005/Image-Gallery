@@ -42,6 +42,7 @@ class Settings:
     pages_public_url: str
     uploads_dir: Path
     max_upload_bytes: int
+    required_db_packet_bytes: int
     smtp_host: str
     smtp_port: int
     smtp_username: str
@@ -64,6 +65,7 @@ def load_settings() -> Settings:
         pages_public_url=pages_url,
         uploads_dir=Path(_env("GALLERY_UPLOADS_DIR", str(ROOT_DIR / "uploads"))),
         max_upload_bytes=int(_env("GALLERY_MAX_UPLOAD_BYTES", str(500 * 1024 * 1024))),
+        required_db_packet_bytes=int(_env("GALLERY_REQUIRED_DB_PACKET_BYTES", str(512 * 1024 * 1024))),
         smtp_host=_env("GALLERY_SMTP_HOST") or _env("SMTP_HOST"),
         smtp_port=int(_env("GALLERY_SMTP_PORT") or _env("SMTP_PORT") or "587"),
         smtp_username=_env("GALLERY_SMTP_USERNAME") or _env("SMTP_USERNAME"),

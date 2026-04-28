@@ -728,3 +728,32 @@ button, input, select, textarea { max-width: 100%; }
   .detail-layout { grid-template-columns: minmax(0, 1fr) !important; }
   .upload-controls-grid, .settings-grid { grid-template-columns: minmax(0, 1fr) !important; }
 }
+
+/* Patch: upload modal/menu rendering fixes */
+dialog.modal {
+  width: min(980px, calc(100vw - 20px));
+  max-width: calc(100vw - 20px);
+  max-height: calc(100dvh - 20px);
+  padding: 0;
+  overflow: hidden;
+}
+dialog.modal::backdrop { background: rgba(0, 0, 0, 0.72); }
+.modal-shell {
+  width: 100%;
+  max-height: calc(100dvh - 24px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+}
+.modal-shell.wide { width: min(920px, calc(100vw - 20px)); }
+.modal-head { position: sticky; top: 0; z-index: 5; background: var(--panel, #10161d); }
+#upload-form .modal-actions { position: sticky; bottom: 0; z-index: 4; background: var(--panel, #10161d); padding-top: 10px; }
+#upload-close { min-width: 40px; }
+#auth-open { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+@media (max-width: 640px) {
+  dialog.modal, .modal-shell.wide { width: calc(100vw - 10px); max-width: calc(100vw - 10px); }
+  .modal-shell { padding: 12px; max-height: calc(100dvh - 10px); }
+  .modal-head { margin: -12px -12px 12px; padding: 12px; }
+  #upload-form .modal-actions { margin: 12px -12px -12px; padding: 12px; }
+  #auth-open { max-width: none; }
+}

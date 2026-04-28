@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#101318" />
   <title>Image Gallery</title>
-  <link rel="stylesheet" href="./app/static/styles.css?v=20260428-frontend-fix" />
+  <link rel="stylesheet" href="./app/static/styles.css?v=20260428-upload-ui-packet-500mb" />
 </head>
 <body>
   <header class="topbar">
@@ -102,7 +102,7 @@
     <form method="dialog" class="modal-shell" id="auth-form">
       <div class="modal-head">
         <h2 id="auth-title">Login</h2>
-        <button class="icon-button" value="cancel" type="submit" aria-label="Close">X</button>
+        <button id="auth-close" class="icon-button" type="button" aria-label="Close">X</button>
       </div>
       <div id="auth-error" class="notice error" hidden></div>
       <label class="field">
@@ -166,7 +166,7 @@
     <form method="dialog" class="modal-shell" id="collection-picker-form">
       <div class="modal-head">
         <h2>Add To Collection</h2>
-        <button class="icon-button" value="cancel" type="submit" aria-label="Close">X</button>
+        <button id="collection-picker-close" class="icon-button" type="button" aria-label="Close">X</button>
       </div>
       <div id="collection-picker-error" class="notice error" hidden></div>
       <label class="field">
@@ -183,7 +183,7 @@
     <form method="dialog" class="modal-shell" id="report-form">
       <div class="modal-head">
         <h2>Report Media</h2>
-        <button class="icon-button" value="cancel" type="submit" aria-label="Close">X</button>
+        <button id="report-close" class="icon-button" type="button" aria-label="Close">X</button>
       </div>
       <div id="report-error" class="notice error" hidden></div>
       <label class="field">
@@ -210,7 +210,7 @@
     <form method="dialog" class="modal-shell wide" id="settings-form">
       <div class="modal-head">
         <h2>Account Settings</h2>
-        <button class="icon-button" value="cancel" type="submit" aria-label="Close">X</button>
+        <button id="settings-close" class="icon-button" type="button" aria-label="Close">X</button>
       </div>
       <div id="settings-error" class="notice error" hidden></div>
       <section class="settings-section">
@@ -351,15 +351,15 @@
   </dialog>
 
   <dialog id="upload-dialog" class="modal">
-    <form method="dialog" class="modal-shell wide" id="upload-form">
+    <form class="modal-shell wide" id="upload-form">
       <div class="modal-head">
         <h2>Upload Media</h2>
-        <button class="icon-button" value="cancel" type="submit" aria-label="Close">X</button>
+        <button id="upload-close" class="icon-button" type="button" aria-label="Close">X</button>
       </div>
       <div id="upload-error" class="notice error" hidden></div>
       <label class="drop-zone" for="upload-file">
         <input id="upload-file" name="file" type="file" accept="image/*,video/*" required />
-        <span id="file-label">Choose image, GIF, or video under 250MB</span>
+        <span id="file-label">Choose image, GIF, or video under 500MB</span>
       </label>
       <div class="form-grid">
         <label class="field">
@@ -409,7 +409,7 @@
         <label class="check-row"><input id="upload-pinned" type="checkbox" /> Pin in my studio/feed</label>
       </div>
       <div class="modal-actions">
-        <button class="primary" type="submit">Post</button>
+        <button id="upload-submit" class="primary" type="submit">Post</button>
       </div>
     </form>
   </dialog>
@@ -447,6 +447,6 @@
     </div>
   </dialog>
 
-  <script src="./app/static/final_app.js?v=20260428-frontend-fix"></script>
+  <script src="./app/static/final_app.js?v=20260428-upload-ui-packet-500mb"></script>
 </body>
 </html>
