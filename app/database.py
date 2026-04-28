@@ -110,6 +110,8 @@ class GalleryDatabase:
         self.settings = settings
         self.pool: aiomysql.Pool | None = None
         self._blob_lock = asyncio.Lock()
+        configured_chunk = int(getattr(settings, "db_blob_chunk_bytes", 8 * 1024 * 1024) or 0)
+        self.media_chunk_bytes = max(1024 * 1024, min(configured_chunk, 16 * 1024 * 1024))
 
     async def connect(self) -> None:
         await self._ensure_schema()
@@ -260,6 +262,18 @@ class GalleryDatabase:
                       KEY idx_media_files_kind (media_kind),
                       KEY idx_media_files_user (created_by),
                       CONSTRAINT fk_media_files_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS media_file_chunks (
+                      file_id BIGINT UNSIGNED NOT NULL,
+                      chunk_index INT UNSIGNED NOT NULL,
+                      content LONGBLOB NOT NULL,
+                      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      PRIMARY KEY (file_id, chunk_index),
+                      CONSTRAINT fk_media_file_chunks_file FOREIGN KEY (file_id) REFERENCES media_files(id) ON DELETE CASCADE
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                     """
                 )
@@ -747,32 +761,54 @@ class GalleryDatabase:
                 return list(await cur.fetchall())
 
     async def save_media_file(self, *, user_id: int, content: bytes, sha256: str, mime_type: str, original_filename: str, media_kind: str, file_size: int | None = None) -> dict[str, Any]:
-        # BLOB inserts are packet-heavy. Serialize these writes so live migration and
-        # user uploads cannot corrupt an aiomysql connection with interleaved packets.
+        # Large BLOB writes are serialized and chunked so uploads do not depend on
+        # one huge max_allowed_packet-sized INSERT.
         async with self._blob_lock:
             async with self.pool.acquire() as conn:
                 await conn.ping(reconnect=True)
                 async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await conn.begin()
+                    media_file_id = 0
                     await cur.execute(
                         "SELECT id, sha256, mime_type, original_filename, media_kind, file_size, created_by, created_at FROM media_files WHERE sha256=%s",
                         (sha256,),
                     )
                     existing = await cur.fetchone()
                     if existing:
+                        await conn.rollback()
                         return dict(existing, duplicate=True)
-                    await cur.execute(
-                        """
-                        INSERT INTO media_files (sha256, mime_type, original_filename, media_kind, file_size, content, created_by)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        (sha256, mime_type[:120], original_filename[:255], media_kind, file_size or len(content), content, user_id),
-                    )
-                    await cur.execute(
-                        "SELECT id, sha256, mime_type, original_filename, media_kind, file_size, created_by, created_at FROM media_files WHERE id=%s",
-                        (cur.lastrowid,),
-                    )
-                    row = await cur.fetchone()
-                    return dict(row, duplicate=False)
+                    try:
+                        await cur.execute(
+                            """
+                            INSERT INTO media_files (sha256, mime_type, original_filename, media_kind, file_size, content, created_by)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            """,
+                            (sha256, mime_type[:120], original_filename[:255], media_kind, file_size or len(content), b"", user_id),
+                        )
+                        media_file_id = int(cur.lastrowid)
+                        for chunk_index, offset in enumerate(range(0, len(content), self.media_chunk_bytes)):
+                            await cur.execute(
+                                """
+                                INSERT INTO media_file_chunks (file_id, chunk_index, content)
+                                VALUES (%s, %s, %s)
+                                """,
+                                (media_file_id, chunk_index, content[offset:offset + self.media_chunk_bytes]),
+                            )
+                        await cur.execute(
+                            "SELECT id, sha256, mime_type, original_filename, media_kind, file_size, created_by, created_at FROM media_files WHERE id=%s",
+                            (media_file_id,),
+                        )
+                        row = await cur.fetchone()
+                        await conn.commit()
+                        return dict(row, duplicate=False)
+                    except Exception:
+                        await conn.rollback()
+                        if media_file_id:
+                            try:
+                                await cur.execute("DELETE FROM media_files WHERE id=%s", (media_file_id,))
+                            except Exception:
+                                pass
+                        raise
 
     async def get_media_file(self, media_id: int) -> dict[str, Any] | None:
         async with self.pool.acquire() as conn:
@@ -786,7 +822,25 @@ class GalleryDatabase:
                     """,
                     (media_id,),
                 )
-                return await cur.fetchone()
+                row = await cur.fetchone()
+                if not row:
+                    return None
+                content = row.get("content") or b""
+                if len(content) == int(row.get("file_size") or 0):
+                    return row
+                await cur.execute(
+                    """
+                    SELECT content
+                    FROM media_file_chunks
+                    WHERE file_id=%s
+                    ORDER BY chunk_index ASC
+                    """,
+                    (row["id"],),
+                )
+                chunks = await cur.fetchall()
+                if chunks:
+                    row["content"] = b"".join(chunk["content"] for chunk in chunks)
+                return row
 
     async def get_avatar_file(self, user_id: int) -> dict[str, Any] | None:
         async with self.pool.acquire() as conn:
@@ -1849,19 +1903,32 @@ class GalleryDatabase:
                         mime_type = (row.get("mime_type") or mimetypes.guess_type(str(path))[0] or "application/octet-stream")[:120]
                         media_kind = row.get("media_kind") if row.get("media_kind") in {"image", "video"} else ("video" if mime_type.startswith("video/") else "image")
                         original = (row.get("original_filename") or path.name)[:255]
+                        await conn.begin()
                         await cur.execute(
                             """
                             INSERT INTO media_files (sha256, mime_type, original_filename, media_kind, file_size, content, created_by)
                             VALUES (%s, %s, %s, %s, %s, %s, %s)
                             ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id)
                             """,
-                            (sha256, mime_type, original, media_kind, len(content), content, row.get("user_id")),
+                            (sha256, mime_type, original, media_kind, len(content), b"", row.get("user_id")),
                         )
                         file_id = int(cur.lastrowid)
+                        await cur.execute("SELECT COUNT(*) AS n FROM media_file_chunks WHERE file_id=%s", (file_id,))
+                        chunk_count = int((await cur.fetchone() or {}).get("n") or 0)
+                        if chunk_count == 0:
+                            for chunk_index, offset in enumerate(range(0, len(content), self.media_chunk_bytes)):
+                                await cur.execute(
+                                    """
+                                    INSERT INTO media_file_chunks (file_id, chunk_index, content)
+                                    VALUES (%s, %s, %s)
+                                    """,
+                                    (file_id, chunk_index, content[offset:offset + self.media_chunk_bytes]),
+                                )
                         await cur.execute(
                             "UPDATE media_items SET media_file_id=%s, content_sha256=%s, file_size=%s, storage_path=%s WHERE id=%s",
                             (file_id, sha256, len(content), f"db://media/{file_id}", row["id"]),
                         )
+                        await conn.commit()
                         migrated += 1
         return {"migrated": migrated, "missing": missing}
 

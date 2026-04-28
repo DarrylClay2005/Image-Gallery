@@ -1079,13 +1079,14 @@ async def upload_media(
     _rate_limit(f"upload:{auth['id']}", limit=60, window_seconds=3600)
     uploaded = await _read_validated_upload(file, settings.max_upload_bytes)
     packet_limit = await db.get_max_allowed_packet()
-    if packet_limit and uploaded["file_size"] + (16 * 1024 * 1024) > packet_limit:
+    chunk_budget = int(getattr(db, "media_chunk_bytes", 8 * 1024 * 1024)) + (2 * 1024 * 1024)
+    if packet_limit and chunk_budget > packet_limit:
         raise HTTPException(
             status_code=413,
             detail=(
-                f"This upload is {uploaded['file_size'] // (1024 * 1024)}MB, but MariaDB max_allowed_packet is "
-                f"only {packet_limit // (1024 * 1024)}MB. For 500MB uploads, set MariaDB max_allowed_packet to "
-                "512M / 536870912 bytes minimum, then restart MariaDB and this gallery container."
+                f"MariaDB max_allowed_packet is only {packet_limit // (1024 * 1024)}MB. "
+                f"The gallery writes files in {db.media_chunk_bytes // (1024 * 1024)}MB chunks, so raise "
+                "max_allowed_packet or lower GALLERY_DB_BLOB_CHUNK_BYTES."
             ),
         )
     media_kind = uploaded["media_kind"]
@@ -1097,7 +1098,7 @@ async def upload_media(
                 await db.reconnect()
             except Exception:
                 pass
-            raise HTTPException(status_code=503, detail="Database connection reset during upload. Set MariaDB max_allowed_packet to 512M / 536870912 bytes, restart MariaDB, then restart this gallery container.") from None
+            raise HTTPException(status_code=503, detail="Database connection reset during upload. The gallery now stores media in chunks; restart the gallery backend so the chunked schema is active, then try again.") from None
         raise
     if media_file["sha256"] != uploaded["sha256"]:
         raise HTTPException(status_code=500, detail="Stored file hash verification failed.")

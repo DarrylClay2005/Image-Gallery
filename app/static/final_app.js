@@ -179,13 +179,23 @@ function apiUpload(path, body, onProgress) {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", apiUrl(path));
     if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    xhr.upload.addEventListener("loadstart", () => {
+      onProgress?.({ loaded: 0, total: 0, percent: 0, phase: "starting" });
+    });
     xhr.upload.addEventListener("progress", (event) => {
-      if (!event.lengthComputable) return;
+      if (!event.lengthComputable) {
+        onProgress?.({ loaded: event.loaded || 0, total: 0, percent: 0, phase: "uploading" });
+        return;
+      }
       onProgress?.({
         loaded: event.loaded,
         total: event.total,
         percent: Math.max(0, Math.min(100, Math.round((event.loaded / event.total) * 100))),
+        phase: "uploading",
       });
+    });
+    xhr.upload.addEventListener("load", () => {
+      onProgress?.({ loaded: 0, total: 0, percent: 100, phase: "processing" });
     });
     xhr.addEventListener("load", () => {
       let data = {};
@@ -1575,10 +1585,12 @@ function closeUploadDialog() {
   checkUploadReadiness();
 }
 
-function setUploadProgress(percent, label = "Uploading") {
+function setUploadProgress(percent, label = "Uploading", options = {}) {
   showIfPresent("upload-progress-wrap", true);
+  const wrap = safeEl("upload-progress-wrap");
   const bar = safeEl("upload-progress-bar");
   const pct = Math.max(0, Math.min(100, Number(percent || 0)));
+  if (wrap) wrap.classList.toggle("is-processing", Boolean(options.processing));
   if (bar) bar.style.width = `${pct}%`;
   setTextIfPresent("upload-progress-percent", `${Math.round(pct)}%`);
   setTextIfPresent("upload-progress-label", label);
@@ -1586,7 +1598,9 @@ function setUploadProgress(percent, label = "Uploading") {
 
 function resetUploadProgress() {
   showIfPresent("upload-progress-wrap", false);
+  const wrap = safeEl("upload-progress-wrap");
   const bar = safeEl("upload-progress-bar");
+  if (wrap) wrap.classList.remove("is-processing");
   if (bar) bar.style.width = "0%";
   setTextIfPresent("upload-progress-percent", "0%");
   setTextIfPresent("upload-progress-label", "Preparing upload");
@@ -1667,9 +1681,17 @@ async function submitUpload(event) {
       submit.textContent = "Uploading...";
     }
     setUploadProgress(0, "Starting upload");
-    const uploaded = await apiUpload("/api/media", body, ({ loaded, total, percent }) => {
+    const uploaded = await apiUpload("/api/media", body, ({ loaded, total, percent, phase }) => {
       const seconds = Math.max(1, Math.round((Date.now() - uploadStartedAt) / 1000));
-      setUploadProgress(percent, `${formatBytes(loaded)} of ${formatBytes(total)} uploaded in ${seconds}s`);
+      if (phase === "processing") {
+        setUploadProgress(100, "Upload received. Saving media chunks on the server...", { processing: true });
+        return;
+      }
+      if (total) {
+        setUploadProgress(percent, `${formatBytes(loaded)} of ${formatBytes(total)} uploaded in ${seconds}s`);
+      } else {
+        setUploadProgress(percent || 12, `${formatBytes(loaded)} uploaded. Measuring transfer...`, { processing: true });
+      }
     });
     setUploadProgress(100, "Saved. Refreshing gallery");
     uploadInFlight = false;
