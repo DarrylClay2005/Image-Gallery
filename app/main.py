@@ -50,6 +50,14 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class EmailUpdateRequest(BaseModel):
+    email: str | None = None
+
+
+class EmailCodeRequest(BaseModel):
+    code: str
+
+
 class CategoryRequest(BaseModel):
     name: str
     media_kind: str = "mixed"
@@ -161,6 +169,10 @@ def _public_url(request: Request, storage_path: str) -> str:
 
 def _verification_url(request: Request, token: str) -> str:
     return str(request.url_for("verify_email")).replace("http://", "https://") + f"?token={token}"
+
+
+def _verification_code() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
 
 
 def _wants_json(request: Request) -> bool:
@@ -359,7 +371,7 @@ async def health() -> dict[str, Any]:
 
 @app.post("/api/auth/register")
 async def register(payload: RegisterRequest, request: Request) -> dict[str, Any]:
-    email_token = secrets.token_urlsafe(32) if payload.email else None
+    email_token = _verification_code() if payload.email else None
     try:
         user = await db.register_user(payload.username, payload.password, payload.display_name, payload.email, email_token)
     except ValueError as exc:
@@ -370,7 +382,7 @@ async def register(payload: RegisterRequest, request: Request) -> dict[str, Any]
         raise
     verification_sent = False
     if user.get("email") and email_token:
-        verification_sent = send_verification_email(settings, user["email"], _verification_url(request, email_token))
+        verification_sent = send_verification_email(settings, user["email"], _verification_url(request, email_token), email_token)
     return {"user": _jsonable(user), "token": issue_token(settings.session_secret, user), "email_verification_sent": verification_sent}
 
 
@@ -396,10 +408,37 @@ async def resend_verification(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="This account does not have an email address.")
     if user.get("email_verified_at"):
         return {"ok": True, "email_verification_sent": False, "already_verified": True}
-    email_token = secrets.token_urlsafe(32)
+    email_token = _verification_code()
     user = await db.issue_email_verification_token(int(auth["id"]), email_token)
-    verification_sent = bool(user and send_verification_email(settings, user["email"], _verification_url(request, email_token)))
+    verification_sent = bool(user and send_verification_email(settings, user["email"], _verification_url(request, email_token), email_token))
     return {"ok": verification_sent, "email_verification_sent": verification_sent, "already_verified": False}
+
+
+@app.post("/api/me/email")
+async def update_email(payload: EmailUpdateRequest, request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    try:
+        user = await db.update_user_email(int(auth["id"]), payload.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    verification_sent = False
+    if user and user.get("email"):
+        email_token = _verification_code()
+        user = await db.issue_email_verification_token(int(auth["id"]), email_token)
+        verification_sent = bool(user and send_verification_email(settings, user["email"], _verification_url(request, email_token), email_token))
+    return {"ok": True, "user": _jsonable(user), "email_verification_sent": verification_sent}
+
+
+@app.post("/api/me/email/verify")
+async def verify_email_code(payload: EmailCodeRequest, request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    code = re.sub(r"\D+", "", str(payload.code or ""))[:12]
+    if not code:
+        raise HTTPException(status_code=400, detail="Enter the verification code from your email.")
+    user = await db.verify_email_code(int(auth["id"]), code)
+    if not user:
+        raise HTTPException(status_code=400, detail="Invalid verification code.")
+    return {"ok": True, "user": _jsonable(user)}
 
 
 @app.post("/api/auth/login")

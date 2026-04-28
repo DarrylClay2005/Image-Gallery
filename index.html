@@ -225,6 +225,20 @@
             <input id="settings-display-name" maxlength="80" required />
           </label>
           <label class="field">
+            <span>Email</span>
+            <input id="settings-email" type="email" autocomplete="email" placeholder="you@example.com" />
+          </label>
+          <label class="field">
+            <span>Email verification code</span>
+            <input id="settings-email-code" inputmode="numeric" autocomplete="one-time-code" placeholder="000000" />
+          </label>
+          <div class="field">
+            <span>Email status</span>
+            <button id="settings-email-save" type="button">Save + Send Code</button>
+            <button id="settings-email-verify" type="button">Verify Code</button>
+            <small id="settings-email-status" class="muted">No email set</small>
+          </div>
+          <label class="field">
             <span>Profile color</span>
             <input id="settings-profile-color" type="color" value="#37c9a7" />
           </label>
@@ -417,6 +431,6 @@
     </div>
   </dialog>
 
-  <script src="./app/static/final_app.js?v=2"></script>
+  <script src="./app/static/final_app.js?v=3"></script>
 </body>
 </html>

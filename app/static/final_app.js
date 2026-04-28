@@ -93,7 +93,7 @@ function renderAuth() {
   if (currentUser) {
     $("account-name").textContent = currentUser.display_name || currentUser.username;
     const emailNote = currentUser.email && !currentUser.email_verified
-      ? " Email verification is pending."
+      ? " Email verification is pending; enter the emailed code in settings."
       : currentUser.email_verified
         ? " Email verified."
         : "";
@@ -623,8 +623,8 @@ async function submitAuth(event) {
       setNotice(
         "auth-error",
         data.email_verification_sent
-          ? "Account created. Check your email for the verification link."
-          : "Account created, but the verification email could not be sent. You can resend it from your account card.",
+          ? "Account created. Check your email for the verification code."
+          : "Account created, but the verification email could not be sent. Check SMTP settings, then resend from your account card.",
       );
     }
     $("auth-dialog").close();
@@ -638,6 +638,13 @@ function fillSettingsForm() {
   if (!currentUser) return;
   const prefs = userSettings();
   $("settings-display-name").value = currentUser.display_name || currentUser.username || "";
+  $("settings-email").value = currentUser.email || "";
+  $("settings-email-code").value = "";
+  $("settings-email-status").textContent = currentUser.email
+    ? currentUser.email_verified
+      ? "Email verified"
+      : "Email not verified"
+    : "No email set";
   $("settings-bio").value = currentUser.bio || "";
   $("settings-website").value = currentUser.website_url || "";
   $("settings-location").value = currentUser.location_label || "";
@@ -656,6 +663,48 @@ function fillSettingsForm() {
   $("pref-blur-video-previews").checked = Boolean(prefs.blur_video_previews);
   $("settings-age-status").textContent = currentUser.age_verified ? "Verified for 18+ posts" : "Not verified";
   renderAvatar("settings-avatar-preview", currentUser);
+}
+
+async function saveEmailAndSendCode() {
+  if (!currentUser) return;
+  setNotice("settings-error", "");
+  try {
+    const data = await apiFetch("/api/me/email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: $("settings-email").value.trim() || null }),
+    });
+    currentUser = data.user;
+    writeStore(USER_KEY, JSON.stringify(currentUser));
+    renderAuth();
+    fillSettingsForm();
+    $("settings-email-status").textContent = currentUser.email
+      ? data.email_verification_sent
+        ? "Verification code sent. Enter it below."
+        : "Email saved, but the verification code could not be sent."
+      : "Email removed.";
+  } catch (err) {
+    setNotice("settings-error", err.message);
+  }
+}
+
+async function verifyEmailCode() {
+  if (!currentUser) return;
+  setNotice("settings-error", "");
+  try {
+    const data = await apiFetch("/api/me/email/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: $("settings-email-code").value.trim() }),
+    });
+    currentUser = data.user;
+    writeStore(USER_KEY, JSON.stringify(currentUser));
+    renderAuth();
+    fillSettingsForm();
+    $("settings-email-status").textContent = "Email verified.";
+  } catch (err) {
+    setNotice("settings-error", err.message);
+  }
 }
 
 async function submitAgeVerification(event) {
@@ -788,10 +837,10 @@ async function resendEmailVerification() {
   try {
     const data = await apiFetch("/api/auth/resend-verification", { method: "POST" });
     $("account-bio").textContent = data.email_verification_sent
-      ? "Verification email sent. Check your inbox."
+      ? "Verification code sent. Check your inbox."
       : data.already_verified
         ? "Email already verified."
-        : "Verification email could not be sent.";
+        : "Verification code could not be sent.";
   } catch (err) {
     $("account-bio").textContent = err.message;
   } finally {
@@ -813,6 +862,8 @@ function bindEvents() {
   $("auth-toggle").addEventListener("click", () => setRegisterMode(!registerMode));
   $("auth-form").addEventListener("submit", submitAuth);
   $("resend-email-verification").addEventListener("click", resendEmailVerification);
+  $("settings-email-save").addEventListener("click", saveEmailAndSendCode);
+  $("settings-email-verify").addEventListener("click", verifyEmailCode);
   $("surprise-open").addEventListener("click", openSurprise);
   $("collections-open").addEventListener("click", openCollectionsDialog);
   $("collections-close").addEventListener("click", () => $("collections-dialog").close());

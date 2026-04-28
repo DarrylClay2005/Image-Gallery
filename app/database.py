@@ -374,6 +374,45 @@ class GalleryDatabase:
                 )
         return await self.get_user(user_id)
 
+    async def update_user_email(self, user_id: int, email: str | None) -> dict[str, Any] | None:
+        normalized = normalize_email(email)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE users
+                    SET email=%s, email_verified_at=NULL, email_verification_token_hash=NULL, email_verification_sent_at=NULL
+                    WHERE id=%s
+                    """,
+                    (normalized, user_id),
+                )
+        return await self.get_user(user_id)
+
+    async def verify_email_code(self, user_id: int, code: str) -> dict[str, Any] | None:
+        token_hash = verification_token_hash(code)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT id FROM users
+                    WHERE id=%s AND email IS NOT NULL AND email_verification_token_hash=%s
+                    LIMIT 1
+                    """,
+                    (user_id, token_hash),
+                )
+                row = await cur.fetchone()
+                if not row:
+                    return None
+                await cur.execute(
+                    """
+                    UPDATE users
+                    SET email_verified_at=CURRENT_TIMESTAMP, email_verification_token_hash=NULL
+                    WHERE id=%s
+                    """,
+                    (user_id,),
+                )
+        return await self.get_user(user_id)
+
     async def authenticate_user(self, username: str, password: str) -> dict[str, Any] | None:
         username = normalize_username(username)
         async with self.pool.acquire() as conn:
