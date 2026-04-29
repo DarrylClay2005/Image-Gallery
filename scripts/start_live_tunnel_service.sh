@@ -10,7 +10,7 @@ LOG_DIR="${ROOT_DIR}/.runtime"
 TUNNEL_LOG="${LOG_DIR}/cloudflared-service.log"
 UVICORN_LOG="${LOG_DIR}/uvicorn-service-fallback.log"
 AUTO_PUSH_CONFIG="${GALLERY_AUTO_PUSH_CONFIG:-1}"
-ALLOW_FALLBACK_BACKEND="${GALLERY_SERVICE_START_BACKEND_IF_MISSING:-0}"
+ALLOW_FALLBACK_BACKEND="${GALLERY_SERVICE_START_BACKEND_IF_MISSING:-1}"
 PAGES_ORIGIN="${GALLERY_PAGES_ORIGIN:-https://darrylclay2005.github.io}"
 PAGES_URL="${GALLERY_PAGES_PUBLIC_URL:-https://darrylclay2005.github.io/Image-Gallery/}"
 
@@ -21,6 +21,15 @@ write_config() {
   cat > "${CONFIG_FILE}" <<JSON
 {
   "gallery_url": "${gallery_url}",
+  "updated_at": "$(date -Is)"
+}
+JSON
+}
+
+write_offline_config() {
+  cat > "${CONFIG_FILE}" <<JSON
+{
+  "gallery_url": "",
   "updated_at": "$(date -Is)"
 }
 JSON
@@ -118,6 +127,10 @@ start_fallback_backend() {
 }
 
 cleanup() {
+  if [[ -n "${PUBLISHED_GALLERY_URL:-}" ]] && grep -Fq "\"gallery_url\": \"${PUBLISHED_GALLERY_URL}\"" "${CONFIG_FILE}" 2>/dev/null; then
+    write_offline_config
+    publish_config
+  fi
   if [[ -n "${TUNNEL_PID:-}" ]]; then kill "${TUNNEL_PID}" >/dev/null 2>&1 || true; fi
   if [[ -n "${UVICORN_PID:-}" ]]; then kill "${UVICORN_PID}" >/dev/null 2>&1 || true; fi
 }
@@ -170,6 +183,7 @@ for _ in {1..120}; do
   for _ in {1..40}; do
     if curl -fsS --max-time 10 "${GALLERY_URL}/api/health" >/dev/null 2>&1; then
       write_config "${GALLERY_URL}"
+      PUBLISHED_GALLERY_URL="${GALLERY_URL}"
       publish_config
       echo "Live backend URL: ${GALLERY_URL}"
       echo "GitHub Pages frontend: ${PAGES_URL}"

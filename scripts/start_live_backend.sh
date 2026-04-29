@@ -36,6 +36,15 @@ write_config() {
 EOF
 }
 
+write_offline_config() {
+  cat > "${CONFIG_FILE}" <<EOF
+{
+  "gallery_url": "",
+  "updated_at": "$(date -Is)"
+}
+EOF
+}
+
 run_host_git() {
   if command -v flatpak-spawn >/dev/null 2>&1; then
     flatpak-spawn --host git -C "${ROOT_DIR}" "$@"
@@ -109,6 +118,10 @@ cloudflared_bin() {
 }
 
 cleanup() {
+  if [[ -n "${PUBLISHED_GALLERY_URL:-}" ]] && grep -Fq "\"gallery_url\": \"${PUBLISHED_GALLERY_URL}\"" "${CONFIG_FILE}" 2>/dev/null; then
+    write_offline_config
+    publish_config
+  fi
   rm -f "${PID_FILE}"
   if [[ -n "${UVICORN_PID:-}" ]]; then
     kill "${UVICORN_PID}" >/dev/null 2>&1 || true
@@ -170,6 +183,7 @@ for _ in {1..80}; do
       exit 1
     fi
     write_config "${GALLERY_URL}"
+    PUBLISHED_GALLERY_URL="${GALLERY_URL}"
     publish_config
     echo
     echo "Live backend URL: ${GALLERY_URL}"
