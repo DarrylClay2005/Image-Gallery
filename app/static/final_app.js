@@ -62,6 +62,7 @@ let detailZoom = 1;
 let detailRotation = 0;
 const revealedAdultMedia = new Set();
 let localBackendUrls = [];
+let remoteConfigRefreshPromise = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -147,13 +148,94 @@ function apiUrl(path) {
   return `${apiOrigin}${normalized}`;
 }
 
-async function apiFetch(path, options = {}) {
+function normalizeApiAssetUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return raw;
+  if (!REMOTE_MODE || !apiOrigin) return raw;
+  try {
+    const parsed = new URL(raw, window.location.href);
+    const currentOrigin = new URL(apiOrigin);
+    const knownBackendHost = (
+      parsed.hostname.endsWith(".trycloudflare.com")
+      || parsed.hostname.endsWith(".pinggy-free.link")
+      || parsed.hostname.endsWith(".serveousercontent.com")
+      || parsed.hostname.endsWith(".lhr.life")
+    );
+    if (
+      parsed.pathname.startsWith("/api/")
+      && (knownBackendHost || parsed.origin === window.location.origin || parsed.origin === currentOrigin.origin)
+    ) {
+      return `${apiOrigin}${parsed.pathname}${parsed.search}${parsed.hash}`;
+    }
+  } catch (_err) {}
+  return raw;
+}
+
+function normalizeApiLinkedUrls(value) {
+  if (Array.isArray(value)) return value.map((item) => normalizeApiLinkedUrls(item));
+  if (!value || typeof value !== "object") return value;
+  const normalized = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (item && typeof item === "object") {
+      normalized[key] = normalizeApiLinkedUrls(item);
+      continue;
+    }
+    if (typeof item === "string" && ["url", "download_url", "user_avatar_url", "avatar_url", "cover_url"].includes(key)) {
+      normalized[key] = normalizeApiAssetUrl(item);
+      continue;
+    }
+    normalized[key] = item;
+  }
+  return normalized;
+}
+
+function syncStoredUserUrls() {
+  if (!currentUser) return;
+  currentUser = normalizeApiLinkedUrls(currentUser);
+  writeStore(USER_KEY, JSON.stringify(currentUser));
+}
+
+async function refreshRemoteBackendConfig({ force = false } = {}) {
+  if (!REMOTE_MODE) return true;
+  if (!force && apiOrigin) {
+    syncStoredUserUrls();
+    return true;
+  }
+  if (remoteConfigRefreshPromise) return remoteConfigRefreshPromise;
+  remoteConfigRefreshPromise = (async () => {
+    const response = await fetch(`${CONFIG_FILE}?t=${Date.now()}`, { cache: "no-store" });
+    if (!response.ok) throw new Error(`Config HTTP ${response.status}`);
+    const config = await response.json();
+    localBackendUrls = normalizeLocalUrls(config.local_urls);
+    apiOrigin = String(config.gallery_url || "").replace(/\/$/, "");
+    if (!apiOrigin) throw new Error("live-config.json has no gallery_url");
+    syncStoredUserUrls();
+    if (currentUser) {
+      renderAuth();
+      fillSettingsForm();
+    }
+    return true;
+  })();
+  try {
+    return await remoteConfigRefreshPromise;
+  } finally {
+    remoteConfigRefreshPromise = null;
+  }
+}
+
+async function apiFetch(path, options = {}, attempt = 0) {
   const headers = new Headers(options.headers || {});
   if (token) headers.set("Authorization", `Bearer ${token}`);
   let response;
   try {
     response = await fetch(apiUrl(path), { ...options, headers });
   } catch (err) {
+    if (REMOTE_MODE && attempt === 0) {
+      try {
+        await refreshRemoteBackendConfig({ force: true });
+        return apiFetch(path, options, attempt + 1);
+      } catch (_refreshErr) {}
+    }
     const error = new Error(`Backend unreachable: ${err.message || err}`);
     error.status = 0;
     throw error;
@@ -161,6 +243,13 @@ async function apiFetch(path, options = {}) {
   const text = await response.text();
   let data = {};
   try { data = text ? JSON.parse(text) : {}; } catch (_err) { data = { detail: text || "Invalid server response" }; }
+  data = normalizeApiLinkedUrls(data);
+  if (REMOTE_MODE && attempt === 0 && response.status >= 500) {
+    try {
+      await refreshRemoteBackendConfig({ force: true });
+      return apiFetch(path, options, attempt + 1);
+    } catch (_refreshErr) {}
+  }
   if (!response.ok) {
     const error = new Error(data.detail || data.message || "Request failed");
     error.status = response.status;
@@ -169,16 +258,28 @@ async function apiFetch(path, options = {}) {
   return data;
 }
 
-async function apiBlobFetch(path, options = {}) {
+async function apiBlobFetch(path, options = {}, attempt = 0) {
   const headers = new Headers(options.headers || {});
   if (token) headers.set("Authorization", `Bearer ${token}`);
   let response;
   try {
     response = await fetch(apiUrl(path), { ...options, headers });
   } catch (err) {
+    if (REMOTE_MODE && attempt === 0) {
+      try {
+        await refreshRemoteBackendConfig({ force: true });
+        return apiBlobFetch(path, options, attempt + 1);
+      } catch (_refreshErr) {}
+    }
     const error = new Error(`Backend unreachable: ${err.message || err}`);
     error.status = 0;
     throw error;
+  }
+  if (REMOTE_MODE && attempt === 0 && response.status >= 500) {
+    try {
+      await refreshRemoteBackendConfig({ force: true });
+      return apiBlobFetch(path, options, attempt + 1);
+    } catch (_refreshErr) {}
   }
   if (!response.ok) {
     let detail = "Request failed";
@@ -195,48 +296,64 @@ async function apiBlobFetch(path, options = {}) {
 
 function apiUpload(path, body, onProgress) {
   return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", apiUrl(path));
-    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
-    xhr.upload.addEventListener("loadstart", () => {
-      onProgress?.({ loaded: 0, total: 0, percent: 0, phase: "starting" });
-    });
-    xhr.upload.addEventListener("progress", (event) => {
-      if (!event.lengthComputable) {
-        onProgress?.({ loaded: event.loaded || 0, total: 0, percent: 0, phase: "uploading" });
-        return;
-      }
-      onProgress?.({
-        loaded: event.loaded,
-        total: event.total,
-        percent: Math.max(0, Math.min(100, Math.round((event.loaded / event.total) * 100))),
-        phase: "uploading",
+    const attemptUpload = async (attempt = 0) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", apiUrl(path));
+      if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+      xhr.upload.addEventListener("loadstart", () => {
+        onProgress?.({ loaded: 0, total: 0, percent: 0, phase: "starting" });
       });
-    });
-    xhr.upload.addEventListener("load", () => {
-      onProgress?.({ loaded: 0, total: 0, percent: 100, phase: "processing" });
-    });
-    xhr.addEventListener("load", () => {
-      let data = {};
-      try { data = xhr.responseText ? JSON.parse(xhr.responseText) : {}; } catch (_err) { data = { detail: xhr.responseText || "Invalid server response" }; }
-      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
-      else {
-        const error = new Error(data.detail || data.message || "Upload failed");
-        error.status = xhr.status;
+      xhr.upload.addEventListener("progress", (event) => {
+        if (!event.lengthComputable) {
+          onProgress?.({ loaded: event.loaded || 0, total: 0, percent: 0, phase: "uploading" });
+          return;
+        }
+        onProgress?.({
+          loaded: event.loaded,
+          total: event.total,
+          percent: Math.max(0, Math.min(100, Math.round((event.loaded / event.total) * 100))),
+          phase: "uploading",
+        });
+      });
+      xhr.upload.addEventListener("load", () => {
+        onProgress?.({ loaded: 0, total: 0, percent: 100, phase: "processing" });
+      });
+      xhr.addEventListener("load", async () => {
+        let data = {};
+        try { data = xhr.responseText ? JSON.parse(xhr.responseText) : {}; } catch (_err) { data = { detail: xhr.responseText || "Invalid server response" }; }
+        data = normalizeApiLinkedUrls(data);
+        if (REMOTE_MODE && attempt === 0 && xhr.status >= 500) {
+          try {
+            await refreshRemoteBackendConfig({ force: true });
+            return attemptUpload(attempt + 1);
+          } catch (_refreshErr) {}
+        }
+        if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+        else {
+          const error = new Error(data.detail || data.message || "Upload failed");
+          error.status = xhr.status;
+          reject(error);
+        }
+      });
+      xhr.addEventListener("error", async () => {
+        if (REMOTE_MODE && attempt === 0) {
+          try {
+            await refreshRemoteBackendConfig({ force: true });
+            return attemptUpload(attempt + 1);
+          } catch (_refreshErr) {}
+        }
+        const error = new Error("Backend unreachable during upload.");
+        error.status = 0;
         reject(error);
-      }
-    });
-    xhr.addEventListener("error", () => {
-      const error = new Error("Backend unreachable during upload.");
-      error.status = 0;
-      reject(error);
-    });
-    xhr.addEventListener("abort", () => {
-      const error = new Error("Upload was cancelled.");
-      error.status = 0;
-      reject(error);
-    });
-    xhr.send(body);
+      });
+      xhr.addEventListener("abort", () => {
+        const error = new Error("Upload was cancelled.");
+        error.status = 0;
+        reject(error);
+      });
+      xhr.send(body);
+    };
+    attemptUpload();
   });
 }
 
@@ -766,12 +883,7 @@ async function initApiOrigin() {
     return true;
   }
   try {
-    const response = await fetch(`${CONFIG_FILE}?t=${Date.now()}`, { cache: "no-store" });
-    if (!response.ok) throw new Error(`Config HTTP ${response.status}`);
-    const config = await response.json();
-    localBackendUrls = normalizeLocalUrls(config.local_urls);
-    apiOrigin = String(config.gallery_url || "").replace(/\/$/, "");
-    if (!apiOrigin) throw new Error("live-config.json has no gallery_url");
+    await refreshRemoteBackendConfig({ force: true });
     if (status) status.textContent = "Live";
     applyDesmondVisibility();
     return true;
