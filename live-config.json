@@ -1,4 +1,6 @@
 {
-  "gallery_url": "https://permanent-shapes-preparation-tablet.trycloudflare.com",
-  "updated_at": "2026-04-28T22:26:01-05:00"
+  "gallery_url": "",
+  "status": "offline",
+  "local_urls": ["http://127.0.0.1:8788", "http://localhost:8788"],
+  "updated_at": "2026-04-28T23:58:06-05:00"
 }
