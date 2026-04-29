@@ -521,7 +521,10 @@ allowed_origins = settings.cors_allowed_origins or [
     "http://127.0.0.1:8788",
     "http://localhost:8788",
 ]
-cors_origin_regex = os.getenv("GALLERY_CORS_ALLOW_ORIGIN_REGEX", r"https://[a-z0-9-]+\.trycloudflare\.com")
+cors_origin_regex = os.getenv(
+    "GALLERY_CORS_ALLOW_ORIGIN_REGEX",
+    r"(https://[a-z0-9-]+\.(trycloudflare\.com|pinggy-free\.link|serveousercontent\.com|lhr\.life)|http://(localhost|127\.0\.0\.1|10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})(:\d+)?)",
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,

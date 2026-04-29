@@ -61,6 +61,7 @@ let slideshowItemsOverride = null;
 let detailZoom = 1;
 let detailRotation = 0;
 const revealedAdultMedia = new Set();
+let localBackendUrls = [];
 
 const $ = (id) => document.getElementById(id);
 
@@ -270,6 +271,42 @@ function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[char]));
+}
+
+function normalizeLocalUrls(values) {
+  const seen = new Set();
+  return (Array.isArray(values) ? values : [])
+    .map((value) => String(value || "").trim().replace(/\/$/, ""))
+    .filter((value) => {
+      if (!value || seen.has(value)) return false;
+      seen.add(value);
+      return true;
+    });
+}
+
+function renderBackendHelp(err) {
+  const title = safeEl("empty-title");
+  const message = safeEl("empty-message");
+  const status = safeEl("connection-status");
+  const detail = err?.message || String(err || "Backend unavailable");
+  const links = localBackendUrls.length
+    ? `<div class="empty-links">${localBackendUrls.map((url) => (
+      `<a href="${escapeHtml(url)}/" target="_blank" rel="noreferrer">${escapeHtml(url)}</a>`
+    )).join("")}</div>`
+    : "";
+  if (title) title.textContent = REMOTE_MODE ? "Public backend is offline" : "Backend unavailable";
+  if (message) {
+    message.innerHTML = REMOTE_MODE
+      ? `The GitHub Pages tunnel is not connected right now. Open a local gallery URL instead.${links}`
+      : `Backend connection failed: ${escapeHtml(detail)}${links}`;
+  }
+  if (status) {
+    status.textContent = "No backend";
+    status.dataset.state = "error";
+    status.title = detail;
+  }
+  setTextIfPresent("result-count", REMOTE_MODE ? "Public backend offline. Local gallery links are ready below." : detail);
+  showIfPresent("empty-state", true);
 }
 
 function renderAuth() {
@@ -723,6 +760,7 @@ async function initApiOrigin() {
   const status = safeEl("connection-status");
   if (!REMOTE_MODE) {
     apiOrigin = "";
+    localBackendUrls = normalizeLocalUrls([window.location.origin, "http://127.0.0.1:8788", "http://localhost:8788"]);
     if (status) status.textContent = "Local";
     applyDesmondVisibility();
     return true;
@@ -731,6 +769,7 @@ async function initApiOrigin() {
     const response = await fetch(`${CONFIG_FILE}?t=${Date.now()}`, { cache: "no-store" });
     if (!response.ok) throw new Error(`Config HTTP ${response.status}`);
     const config = await response.json();
+    localBackendUrls = normalizeLocalUrls(config.local_urls);
     apiOrigin = String(config.gallery_url || "").replace(/\/$/, "");
     if (!apiOrigin) throw new Error("live-config.json has no gallery_url");
     if (status) status.textContent = "Live";
@@ -738,13 +777,7 @@ async function initApiOrigin() {
     return true;
   } catch (err) {
     apiOrigin = "";
-    if (status) {
-      status.textContent = "No backend";
-      status.dataset.state = "error";
-      status.title = err.message || String(err);
-    }
-    setTextIfPresent("result-count", `Backend config failed: ${err.message || err}`);
-    showIfPresent("empty-state", true);
+    renderBackendHelp(err);
     applyDesmondVisibility();
     return false;
   }
