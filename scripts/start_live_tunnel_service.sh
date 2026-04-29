@@ -13,6 +13,7 @@ AUTO_PUSH_CONFIG="${GALLERY_AUTO_PUSH_CONFIG:-1}"
 ALLOW_FALLBACK_BACKEND="${GALLERY_SERVICE_START_BACKEND_IF_MISSING:-1}"
 PAGES_ORIGIN="${GALLERY_PAGES_ORIGIN:-https://darrylclay2005.github.io}"
 PAGES_URL="${GALLERY_PAGES_PUBLIC_URL:-https://darrylclay2005.github.io/Image-Gallery/}"
+MAX_TUNNEL_START_ATTEMPTS="${GALLERY_MAX_TUNNEL_START_ATTEMPTS:-12}"
 
 mkdir -p "${BIN_DIR}" "${LOG_DIR}"
 
@@ -136,6 +137,25 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+tunnel_retry_delay() {
+  local attempt="$1"
+  if (( attempt <= 3 )); then
+    echo 15
+  elif (( attempt <= 6 )); then
+    echo 30
+  else
+    echo 60
+  fi
+}
+
+log_tunnel_failure_details() {
+  echo "Tunnel exited early. Last log lines:" >&2
+  tail -80 "${TUNNEL_LOG}" >&2 || true
+  if grep -Fq 'status_code="429 Too Many Requests"' "${TUNNEL_LOG}" 2>/dev/null; then
+    echo "Cloudflare quick tunnel creation is being rate-limited. Waiting before retrying." >&2
+  fi
+}
+
 CLOUDFLARED="$(cloudflared_bin)"
 
 echo "Waiting for Image Gallery backend on http://127.0.0.1:${PORT}"
@@ -163,40 +183,55 @@ if ! backend_ready; then
   exit 1
 fi
 
-echo "Opening Cloudflare quick tunnel to http://127.0.0.1:${PORT}"
-"${CLOUDFLARED}" tunnel --no-autoupdate --protocol http2 --url "http://127.0.0.1:${PORT}" >"${TUNNEL_LOG}" 2>&1 &
-TUNNEL_PID="$!"
+for ((attempt=1; attempt<=MAX_TUNNEL_START_ATTEMPTS; attempt++)); do
+  echo "Opening Cloudflare quick tunnel to http://127.0.0.1:${PORT} (attempt ${attempt}/${MAX_TUNNEL_START_ATTEMPTS})"
+  : > "${TUNNEL_LOG}"
+  "${CLOUDFLARED}" tunnel --no-autoupdate --protocol http2 --url "http://127.0.0.1:${PORT}" >"${TUNNEL_LOG}" 2>&1 &
+  TUNNEL_PID="$!"
 
-GALLERY_URL=""
-for _ in {1..120}; do
-  if ! kill -0 "${TUNNEL_PID}" >/dev/null 2>&1; then
-    echo "Tunnel exited early. Last log lines:" >&2
-    tail -80 "${TUNNEL_LOG}" >&2 || true
-    exit 1
-  fi
-  GALLERY_URL="$(grep -Eo 'https://[-a-zA-Z0-9.]+trycloudflare\.com' "${TUNNEL_LOG}" | tail -1 || true)"
-  if [[ -z "${GALLERY_URL}" ]]; then
-    sleep 1
-    continue
-  fi
-  echo "Waiting for ${GALLERY_URL} to answer through Cloudflare..."
-  for _ in {1..40}; do
-    if curl -fsS --max-time 10 "${GALLERY_URL}/api/health" >/dev/null 2>&1; then
-      write_config "${GALLERY_URL}"
-      PUBLISHED_GALLERY_URL="${GALLERY_URL}"
-      publish_config
-      echo "Live backend URL: ${GALLERY_URL}"
-      echo "GitHub Pages frontend: ${PAGES_URL}"
-      wait "${TUNNEL_PID}"
-      exit $?
+  GALLERY_URL=""
+  for _ in {1..120}; do
+    if ! kill -0 "${TUNNEL_PID}" >/dev/null 2>&1; then
+      log_tunnel_failure_details
+      break
     fi
-    sleep 1
+    GALLERY_URL="$(grep -Eo 'https://[-a-zA-Z0-9.]+trycloudflare\.com' "${TUNNEL_LOG}" | tail -1 || true)"
+    if [[ -z "${GALLERY_URL}" ]]; then
+      sleep 1
+      continue
+    fi
+    echo "Waiting for ${GALLERY_URL} to answer through Cloudflare..."
+    for _ in {1..40}; do
+      if curl -fsS --max-time 10 "${GALLERY_URL}/api/health" >/dev/null 2>&1; then
+        write_config "${GALLERY_URL}"
+        PUBLISHED_GALLERY_URL="${GALLERY_URL}"
+        publish_config
+        echo "Live backend URL: ${GALLERY_URL}"
+        echo "GitHub Pages frontend: ${PAGES_URL}"
+        wait "${TUNNEL_PID}"
+        exit $?
+      fi
+      if ! kill -0 "${TUNNEL_PID}" >/dev/null 2>&1; then
+        log_tunnel_failure_details
+        break
+      fi
+      sleep 1
+    done
+    if [[ -n "${GALLERY_URL}" ]] && kill -0 "${TUNNEL_PID}" >/dev/null 2>&1; then
+      echo "Tunnel URL was created but never became reachable. Last log lines:" >&2
+      tail -80 "${TUNNEL_LOG}" >&2 || true
+      kill "${TUNNEL_PID}" >/dev/null 2>&1 || true
+    fi
+    break
   done
-  echo "Tunnel URL was created but never became reachable. Last log lines:" >&2
-  tail -80 "${TUNNEL_LOG}" >&2 || true
-  exit 1
+
+  if (( attempt < MAX_TUNNEL_START_ATTEMPTS )); then
+    retry_delay="$(tunnel_retry_delay "${attempt}")"
+    echo "Retrying Cloudflare quick tunnel startup in ${retry_delay}s..."
+    sleep "${retry_delay}"
+  fi
 done
 
-echo "Timed out waiting for Cloudflare tunnel URL." >&2
+echo "Exceeded Cloudflare quick tunnel startup retries." >&2
 tail -80 "${TUNNEL_LOG}" >&2 || true
 exit 1
