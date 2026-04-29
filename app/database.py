@@ -35,6 +35,10 @@ DEFAULT_USER_SETTINGS = {
     "profile_show_collections": True,
     "profile_show_friends": True,
     "profile_show_follow_counts": True,
+    "profile_layout": "spotlight",
+    "profile_banner_style": "gradient",
+    "profile_card_style": "glass",
+    "profile_show_joined_date": True,
 }
 USER_COLUMNS = (
     ("email", "VARCHAR(255) NULL"),
@@ -670,6 +674,9 @@ class GalleryDatabase:
             "theme_mode": {"system", "dark", "light"},
             "grid_density": {"compact", "comfortable", "wide"},
             "default_sort": {"new", "popular", "downloads", "views", "old"},
+            "profile_layout": {"spotlight", "magazine", "stack"},
+            "profile_banner_style": {"gradient", "mesh", "frame"},
+            "profile_card_style": {"glass", "solid", "outline"},
         }
         for key in DEFAULT_USER_SETTINGS:
             if key not in payload:
@@ -1580,6 +1587,7 @@ class GalleryDatabase:
                            CASE WHEN u.public_profile=1 OR u.id=%s THEN u.website_url ELSE NULL END AS website_url,
                            CASE WHEN u.public_profile=1 OR u.id=%s THEN u.location_label ELSE NULL END AS location_label,
                            CASE WHEN u.public_profile=1 OR u.id=%s THEN u.avatar_path ELSE NULL END AS avatar_path,
+                           CASE WHEN u.public_profile=1 OR u.id=%s THEN u.user_settings ELSE NULL END AS user_settings,
                            u.avatar_file_id, u.profile_color, u.public_profile, u.show_liked_count,
                            u.show_collections, u.show_recent_uploads, u.show_friends, u.created_at,
                            COUNT(DISTINCT m.id) AS media_count,
@@ -1601,7 +1609,7 @@ class GalleryDatabase:
                     WHERE u.username=%s
                     GROUP BY u.id
                     """,
-                    (viewer, viewer, viewer, viewer, viewer, viewer, viewer, viewer, viewer, viewer, username),
+                    (viewer, viewer, viewer, viewer, viewer, viewer, viewer, viewer, viewer, viewer, viewer, username),
                 )
                 row = await cur.fetchone()
                 if not row:
@@ -1620,6 +1628,16 @@ class GalleryDatabase:
                         row["featured_tags"] = []
                 elif tags is None:
                     row["featured_tags"] = []
+                raw_settings = row.get("user_settings")
+                settings = dict(DEFAULT_USER_SETTINGS)
+                if isinstance(raw_settings, str):
+                    try:
+                        settings.update(json.loads(raw_settings) or {})
+                    except json.JSONDecodeError:
+                        pass
+                elif isinstance(raw_settings, dict):
+                    settings.update(raw_settings)
+                row["user_settings"] = settings
                 for k in ("media_count", "download_count", "like_count", "follower_count", "following_count", "friend_count"):
                     if isinstance(row.get(k), Decimal):
                         row[k] = int(row[k])

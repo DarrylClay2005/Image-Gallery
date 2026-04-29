@@ -3,6 +3,7 @@ const REMOTE_MODE = window.location.hostname.endsWith("github.io");
 const CONFIG_FILE = "live-config.json";
 const TOKEN_KEY = "image_gallery_token";
 const USER_KEY = "image_gallery_user";
+const REMOTE_ORIGIN_KEY = "image_gallery_remote_origin";
 const GALLERY_VIEW_KEY = "image_gallery_view";
 const SAVED_VIEWS_KEY = "image_gallery_saved_views";
 const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
@@ -25,6 +26,10 @@ const DEFAULT_USER_SETTINGS = {
   profile_show_collections: true,
   profile_show_friends: true,
   profile_show_follow_counts: true,
+  profile_layout: "spotlight",
+  profile_banner_style: "gradient",
+  profile_card_style: "glass",
+  profile_show_joined_date: true,
 };
 const ACCOUNT_NAVIGATION = {
   signedOutUsernameTarget: "auth",
@@ -32,6 +37,8 @@ const ACCOUNT_NAVIGATION = {
   sidebarProfileTarget: "profile",
   settingsTarget: "settings",
 };
+const rawFetch = window.fetch.bind(window);
+const storageFallback = new Map();
 
 let apiOrigin = "";
 let token = readStore(TOKEN_KEY);
@@ -63,6 +70,12 @@ let detailRotation = 0;
 const revealedAdultMedia = new Set();
 let localBackendUrls = [];
 let remoteConfigRefreshPromise = null;
+let currentPage = "discover";
+let activeCollectionId = null;
+let collectionsMineMode = false;
+let profilePageData = null;
+let friendPanelState = { incoming: [], outgoing: [], friends: [] };
+let studioPageState = { items: [], totals: { views: 0, downloads: 0, likes: 0 } };
 
 const $ = (id) => document.getElementById(id);
 
@@ -101,16 +114,33 @@ function showToast(message, kind = "info") {
   if (message) toastTimer = setTimeout(() => { region.hidden = true; }, 3200);
 }
 
+function getStorageCandidates() {
+  const stores = [];
+  try { if (window.localStorage) stores.push(window.localStorage); } catch (_err) {}
+  try { if (window.sessionStorage) stores.push(window.sessionStorage); } catch (_err) {}
+  return stores;
+}
 
 function readStore(key) {
-  try { return localStorage.getItem(key) || ""; } catch (_err) { return ""; }
+  for (const store of getStorageCandidates()) {
+    try {
+      const value = store.getItem(key);
+      if (value !== null && value !== undefined) return value;
+    } catch (_err) {}
+  }
+  return storageFallback.get(key) || "";
 }
 
 function writeStore(key, value) {
-  try {
-    if (value) localStorage.setItem(key, value);
-    else localStorage.removeItem(key);
-  } catch (_err) {}
+  const normalized = String(value || "");
+  if (normalized) storageFallback.set(key, normalized);
+  else storageFallback.delete(key);
+  for (const store of getStorageCandidates()) {
+    try {
+      if (normalized) store.setItem(key, normalized);
+      else store.removeItem(key);
+    } catch (_err) {}
+  }
 }
 
 function readJsonStore(key) {
@@ -124,6 +154,35 @@ function readSavedViews() {
 
 function writeSavedViews(views) {
   writeStore(SAVED_VIEWS_KEY, JSON.stringify(Array.isArray(views) ? views : []));
+}
+
+function normalizeRemoteOrigin(value) {
+  let normalized = String(value || "").trim();
+  if (!normalized) return "";
+  if (!/^https?:\/\//i.test(normalized)) normalized = `https://${normalized}`;
+  try {
+    const url = new URL(normalized);
+    return `${url.protocol}//${url.host}`;
+  } catch (_err) {
+    normalized = normalized.replace(/\/+$/, "");
+    normalized = normalized.replace(/\/(?:index\.html?)$/i, "");
+    normalized = normalized.replace(/\/api$/i, "");
+    return normalized;
+  }
+}
+
+function setApiOrigin(value, persist = true) {
+  apiOrigin = normalizeRemoteOrigin(value);
+  if (persist) writeStore(REMOTE_ORIGIN_KEY, apiOrigin);
+  return apiOrigin;
+}
+
+function buildStaticUrl(path) {
+  try {
+    return new URL(path, window.location.href).toString();
+  } catch (_err) {
+    return path;
+  }
 }
 
 async function copyText(value, successMessage = "Copied.") {
@@ -203,11 +262,11 @@ async function refreshRemoteBackendConfig({ force = false } = {}) {
   }
   if (remoteConfigRefreshPromise) return remoteConfigRefreshPromise;
   remoteConfigRefreshPromise = (async () => {
-    const response = await fetch(`${CONFIG_FILE}?t=${Date.now()}`, { cache: "no-store" });
+    const response = await rawFetch(`${buildStaticUrl(CONFIG_FILE)}?t=${Date.now()}`, { cache: "no-store" });
     if (!response.ok) throw new Error(`Config HTTP ${response.status}`);
     const config = await response.json();
     localBackendUrls = normalizeLocalUrls(config.local_urls);
-    apiOrigin = String(config.gallery_url || "").replace(/\/$/, "");
+    setApiOrigin(config.gallery_url || "", true);
     if (!apiOrigin) throw new Error("live-config.json has no gallery_url");
     syncStoredUserUrls();
     if (currentUser) {
@@ -452,6 +511,8 @@ function renderAuth() {
   }
   applyAccountSettings();
   applyDesmondVisibility();
+  renderTopbarPageState();
+  renderPageSidebar();
 }
 
 function isDesmondUser() {
@@ -523,6 +584,163 @@ function applyAccountSettings() {
   document.body.dataset.reduceMotion = prefs.reduce_motion ? "1" : "0";
   document.body.dataset.blurVideos = prefs.blur_video_previews ? "1" : "0";
   if (currentUser && $("sort-filter").value === "new") $("sort-filter").value = prefs.default_sort || "new";
+}
+
+function galleryHeadingMeta() {
+  if (currentPage === "following" || galleryMode === "following") {
+    return {
+      eyebrow: "Following",
+      title: "Follow Feed",
+      description: "Latest posts from the people you follow, laid out as its own feed instead of being mixed into discovery.",
+    };
+  }
+  if (currentPage === "liked" || galleryMode === "liked") {
+    return {
+      eyebrow: "Liked",
+      title: "Saved Likes",
+      description: "A dedicated stream of posts you already liked, so it feels like a real space and not a side toggle.",
+    };
+  }
+  return {
+    eyebrow: "Discover",
+    title: "Fresh Drops",
+    description: "New uploads, filters, saved views, and feed tools live here.",
+  };
+}
+
+function renderGalleryHeading() {
+  const meta = galleryHeadingMeta();
+  setTextIfPresent("page-eyebrow", meta.eyebrow);
+  setTextIfPresent("page-title", meta.title);
+}
+
+function activeTopbarPage() {
+  if (currentPage === "following" || galleryMode === "following") return "following";
+  if (currentPage === "liked" || galleryMode === "liked") return "liked";
+  if (currentPage === "discover") return "discover";
+  return currentPage;
+}
+
+function renderPageSidebar() {
+  const pageSidebar = safeEl("page-sidebar");
+  const discoverSidebar = document.querySelectorAll(".discover-sidebar-block");
+  const discoverVisible = ["discover", "following", "liked"].includes(currentPage);
+  discoverSidebar.forEach((node) => { node.hidden = !discoverVisible; });
+  if (!pageSidebar) return;
+  if (discoverVisible) {
+    const meta = galleryHeadingMeta();
+    pageSidebar.innerHTML = `
+      <section class="sidebar-note">
+        <h3>${escapeHtml(meta.title)}</h3>
+        <p class="muted">${escapeHtml(meta.description)}</p>
+      </section>
+      <section class="sidebar-note">
+        <h3>Quick Status</h3>
+        <p class="muted">${escapeHtml(latestLiveSnapshot?.media_active ? `${latestLiveSnapshot.media_active} active posts reported by the backend.` : "Run Checks if the gallery feels stale or partially loaded.")}</p>
+      </section>
+    `;
+    return;
+  }
+  if (currentPage === "collections") {
+    pageSidebar.innerHTML = `
+      <section class="sidebar-note">
+        <h3>${collectionsMineMode ? "My Collections" : "Community Collections"}</h3>
+        <p class="muted">${collectionsMineMode ? "Private and public sets you own appear here with editing space beside them." : "Browse public sets, pick one, and inspect its media rail without leaving the page."}</p>
+      </section>
+      <section class="sidebar-note">
+        <h3>Loaded</h3>
+        <p class="muted">${collectionsState.length} collection${collectionsState.length === 1 ? "" : "s"} currently loaded.</p>
+      </section>
+    `;
+    return;
+  }
+  if (currentPage === "users") {
+    pageSidebar.innerHTML = `
+      <section class="sidebar-note">
+        <h3>Directory Tips</h3>
+        <p class="muted">Search by username, display name, bio, or profile headline. Open any profile inline from the results grid.</p>
+      </section>
+    `;
+    return;
+  }
+  if (currentPage === "friends") {
+    pageSidebar.innerHTML = `
+      <section class="sidebar-note">
+        <h3>Relationship Snapshot</h3>
+        <p class="muted">${friendPanelState.friends.length} friends, ${friendPanelState.incoming.length} incoming request${friendPanelState.incoming.length === 1 ? "" : "s"}, ${friendPanelState.outgoing.length} outgoing.</p>
+      </section>
+    `;
+    return;
+  }
+  if (currentPage === "studio") {
+    pageSidebar.innerHTML = `
+      <section class="sidebar-note">
+        <h3>Creator Totals</h3>
+        <p class="muted">${studioPageState.items.length} posts, ${studioPageState.totals.views} views, ${studioPageState.totals.downloads} downloads, ${studioPageState.totals.likes} likes.</p>
+      </section>
+    `;
+    return;
+  }
+  if (currentPage === "profile") {
+    const user = profilePageData?.user || {};
+    pageSidebar.innerHTML = `
+      <section class="sidebar-note">
+        <h3>${escapeHtml(user.display_name || user.username || "Profile")}</h3>
+        <p class="muted">${escapeHtml(user.profile_headline || user.bio || "Expanded profile view with layout and banner styling.")}</p>
+      </section>
+      <section class="sidebar-note">
+        <h3>Public Stats</h3>
+        <p class="muted">${Number(user.media_count || 0)} posts, ${Number(user.follower_count || 0)} followers, ${Number(user.friend_count || 0)} friends.</p>
+      </section>
+    `;
+    return;
+  }
+  pageSidebar.innerHTML = "";
+}
+
+function renderTopbarPageState() {
+  const buttons = {
+    discover: safeEl("discover-open"),
+    collections: safeEl("collections-open"),
+    users: safeEl("users-open"),
+    following: safeEl("following-feed"),
+    friends: safeEl("friends-open"),
+    liked: safeEl("liked-feed"),
+    studio: safeEl("studio-open"),
+    profile: safeEl("profile-open"),
+  };
+  const active = activeTopbarPage();
+  Object.entries(buttons).forEach(([page, button]) => {
+    if (!button) return;
+    button.classList.toggle("is-active", page === active);
+  });
+}
+
+function setCurrentPage(page) {
+  currentPage = page;
+  if (page !== "profile") activeProfileUsername = "";
+  document.body.dataset.page = page;
+  const pages = {
+    discover: safeEl("discover-page"),
+    collections: safeEl("collections-page"),
+    users: safeEl("users-page"),
+    friends: safeEl("friends-page"),
+    studio: safeEl("studio-page"),
+    profile: safeEl("profile-page"),
+  };
+  const discoverVisible = ["discover", "following", "liked"].includes(page);
+  if (pages.discover) pages.discover.hidden = !discoverVisible;
+  if (pages.collections) pages.collections.hidden = page !== "collections";
+  if (pages.users) pages.users.hidden = page !== "users";
+  if (pages.friends) pages.friends.hidden = page !== "friends";
+  if (pages.studio) pages.studio.hidden = page !== "studio";
+  if (pages.profile) pages.profile.hidden = page !== "profile";
+  if (page !== "profile" && location.hash.startsWith("#user/")) {
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+  renderGalleryHeading();
+  renderTopbarPageState();
+  renderPageSidebar();
 }
 
 
@@ -600,11 +818,15 @@ function fillSettingsForm() {
   setValue("pref-grid-density", prefs.grid_density || "comfortable");
   setValue("pref-default-sort", prefs.default_sort || "new");
   setValue("pref-items-per-page", GALLERY_PAGE_SIZE);
+  setValue("pref-profile-layout", prefs.profile_layout || "spotlight");
+  setValue("pref-profile-banner-style", prefs.profile_banner_style || "gradient");
+  setValue("pref-profile-card-style", prefs.profile_card_style || "glass");
   setChecked("pref-autoplay-previews", prefs.autoplay_previews);
   setChecked("pref-muted-previews", prefs.muted_previews !== false);
   setChecked("pref-reduce-motion", prefs.reduce_motion);
   setChecked("pref-open-original", prefs.open_original_in_new_tab);
   setChecked("pref-blur-video-previews", prefs.blur_video_previews);
+  setChecked("pref-profile-show-joined-date", prefs.profile_show_joined_date !== false);
   setTextIfPresent("settings-email-status", currentUser.email ? (currentUser.email_verified ? "Email verified" : "Email verification pending") : "No email set");
   setTextIfPresent("settings-age-status", currentUser.age_verified ? "Verified" : "Not verified");
   renderAvatar("settings-avatar-preview", currentUser);
@@ -641,11 +863,15 @@ async function submitSettings(event) {
       grid_density: $("pref-grid-density").value,
       default_sort: $("pref-default-sort").value,
       items_per_page: GALLERY_PAGE_SIZE,
+      profile_layout: $("pref-profile-layout").value,
+      profile_banner_style: $("pref-profile-banner-style").value,
+      profile_card_style: $("pref-profile-card-style").value,
       autoplay_previews: $("pref-autoplay-previews").checked,
       muted_previews: $("pref-muted-previews").checked,
       reduce_motion: $("pref-reduce-motion").checked,
       open_original_in_new_tab: $("pref-open-original").checked,
       blur_video_previews: $("pref-blur-video-previews").checked,
+      profile_show_joined_date: $("pref-profile-show-joined-date").checked,
       profile_show_uploads: $("settings-show-uploads").checked,
       profile_show_collections: $("settings-show-collections").checked,
       profile_show_friends: $("settings-show-friends").checked,
@@ -876,19 +1102,30 @@ async function refreshMe() {
 async function initApiOrigin() {
   const status = safeEl("connection-status");
   if (!REMOTE_MODE) {
-    apiOrigin = "";
+    setApiOrigin("", false);
     localBackendUrls = normalizeLocalUrls([window.location.origin, "http://127.0.0.1:8788", "http://localhost:8788"]);
     if (status) status.textContent = "Local";
     applyDesmondVisibility();
     return true;
   }
+  const cachedOrigin = readStore(REMOTE_ORIGIN_KEY) || "";
+  setApiOrigin(cachedOrigin, false);
   try {
     await refreshRemoteBackendConfig({ force: true });
     if (status) status.textContent = "Live";
     applyDesmondVisibility();
     return true;
   } catch (err) {
-    apiOrigin = "";
+    if (cachedOrigin) {
+      if (status) {
+        status.textContent = "Cached Live";
+        status.dataset.state = "warn";
+        status.title = `Using cached backend origin because live-config refresh failed: ${err.message || err}`;
+      }
+      applyDesmondVisibility();
+      return true;
+    }
+    setApiOrigin("", false);
     renderBackendHelp(err);
     applyDesmondVisibility();
     return false;
@@ -899,7 +1136,27 @@ async function refreshAll() {
   await runLiveChecks({ silent: true }).catch(() => {});
   await Promise.all([loadCategories(), isDesmondUser() ? loadStats() : Promise.resolve(), loadTags()]);
   if (!galleryViewRestored) restoreGalleryViewState();
-  await loadMedia(galleryMode === "main" ? galleryPage : 1);
+  if (currentPage === "collections") {
+    await openCollectionsPage({ mine: collectionsMineMode, preserveSelection: true });
+    return;
+  }
+  if (currentPage === "users") {
+    await openUserSearchPage({ preserveQuery: true });
+    return;
+  }
+  if (currentPage === "friends") {
+    await openFriendsPage();
+    return;
+  }
+  if (currentPage === "studio") {
+    await openStudio();
+    return;
+  }
+  if (currentPage === "profile" && activeProfileUsername) {
+    await openProfile(activeProfileUsername);
+    return;
+  }
+  await loadCurrentGalleryPage(galleryMode === "main" ? galleryPage : 1);
 }
 
 async function loadTags() {
@@ -1201,8 +1458,12 @@ function renderGallerySkeleton(count = 8) {
 }
 
 async function loadMedia(page = galleryPage, { scrollToTop = false } = {}) {
+  if (["following", "liked"].includes(currentPage)) setCurrentPage("discover");
   galleryMode = "main";
   galleryPage = Math.max(1, Number(page) || 1);
+  renderGalleryHeading();
+  renderTopbarPageState();
+  renderPageSidebar();
   saveGalleryViewState();
   renderActiveFilters();
   galleryLoading = true;
@@ -1720,13 +1981,8 @@ async function loadCollections(mine = false) {
   return collectionsState;
 }
 
-function renderCollections() {
-  const list = $("collections-list");
-  if (!collectionsState.length) {
-    list.innerHTML = `<p class="muted">No collections yet.</p>`;
-    return;
-  }
-  list.innerHTML = collectionsState.map((collection) => `
+function collectionCardMarkup(collection) {
+  return `
     <article class="collection-card">
       <button type="button" data-collection-open="${collection.id}" class="collection-cover">
         ${collection.cover_url ? `<img src="${collection.cover_url}" alt="">` : `<span>${collection.cover_locked ? "18+" : escapeHtml(collection.name.slice(0, 2).toUpperCase())}</span>`}
@@ -1737,50 +1993,86 @@ function renderCollections() {
         <p class="muted">by ${escapeHtml(collection.display_name || collection.username || "Unknown")}</p>
       </div>
     </article>
-  `).join("");
+  `;
 }
 
-async function openCollectionsDialog() {
-  setNotice("collections-error", "");
-  $("collection-media").innerHTML = "";
-  $("collections-dialog").showModal();
-  await loadCollections(false);
+function renderCollections() {
+  const markup = collectionsState.length
+    ? collectionsState.map((collection) => collectionCardMarkup(collection)).join("")
+    : `<p class="muted">No collections yet.</p>`;
+  if (safeEl("collections-list")) $("collections-list").innerHTML = markup;
+  if (safeEl("collections-page-list")) $("collections-page-list").innerHTML = markup;
+  if (safeEl("collections-page-subtitle")) {
+    $("collections-page-subtitle").textContent = collectionsMineMode
+      ? "Your public and private collections live here with an editing rail beside them."
+      : "Browse public community-made sets and inspect them in a dedicated detail panel.";
+  }
+  showIfPresent("collections-page-form", Boolean(currentUser) && collectionsMineMode);
+  renderPageSidebar();
 }
 
-async function createCollection(event) {
-  event.preventDefault();
+function collectionDetailMarkup(collection, media) {
+  return `
+    <div class="section-title-row"><h3>${escapeHtml(collection.name)}</h3><span class="muted">${media.length} posts</span></div>
+    ${collection.description ? `<p class="muted">${escapeHtml(collection.description)}</p>` : ""}
+    <div class="mini-media-grid">${media.length ? media.map((item) => `
+      <button class="mini-media" type="button" data-open="${item.id}">
+        ${renderPreview(item, "mini")}
+        <span>${adultBadge(item)}${escapeHtml(item.title)}</span>
+      </button>
+    `).join("") : `<p class="muted">This collection is empty.</p>`}</div>
+  `;
+}
+
+async function openCollectionsPage({ mine = false, preserveSelection = false } = {}) {
+  collectionsMineMode = Boolean(mine && currentUser);
+  setCurrentPage("collections");
+  setNotice("collections-page-error", "");
+  if (safeEl("collection-media")) $("collection-media").innerHTML = "";
+  if (safeEl("collections-page-detail") && !preserveSelection) {
+    $("collections-page-detail").innerHTML = `
+      <div class="empty-state page-empty-state">
+        <h2>Select a collection</h2>
+        <p>Its post rail, visibility, and owner info will appear here.</p>
+      </div>
+    `;
+  }
+  await loadCollections(collectionsMineMode);
+  const preferredId = preserveSelection ? activeCollectionId : null;
+  const firstId = preferredId || collectionsState[0]?.id;
+  if (firstId) {
+    await openCollection(firstId);
+  }
+}
+
+async function createCollectionFromInputs({ name, description, isPublic, noticeId }) {
   if (!currentUser) return $("auth-dialog").showModal();
-  setNotice("collections-error", "");
+  setNotice(noticeId, "");
   try {
     await apiFetch("/api/collections", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        name: $("collection-name").value,
-        description: $("collection-description").value,
-        is_public: $("collection-public").checked,
+        name,
+        description,
+        is_public: isPublic,
       }),
     });
-    $("collection-form").reset();
-    $("collection-public").checked = true;
-    await loadCollections(false);
+    activeCollectionId = null;
+    showToast("Collection created.", "success");
+    await openCollectionsPage({ mine: true, preserveSelection: true });
   } catch (err) {
-    setNotice("collections-error", err.message);
+    setNotice(noticeId, err.message);
   }
 }
 
 async function openCollection(id) {
+  activeCollectionId = Number(id) || null;
   const data = await apiFetch(`/api/collections/${id}`);
   const media = data.media || [];
-  $("collection-media").innerHTML = `
-    <div class="section-title-row"><h3>${escapeHtml(data.collection.name)}</h3><span class="muted">${media.length} posts</span></div>
-    ${media.length ? media.map((item) => `
-      <button class="mini-media" type="button" data-open="${item.id}">
-        ${renderPreview(item, "mini")}
-        <span>${adultBadge(item)}${escapeHtml(item.title)}</span>
-      </button>
-    `).join("") : `<p class="muted">This collection is empty.</p>`}
-  `;
+  const markup = collectionDetailMarkup(data.collection, media);
+  if (safeEl("collection-media")) $("collection-media").innerHTML = markup;
+  if (safeEl("collections-page-detail")) $("collections-page-detail").innerHTML = markup;
 }
 
 async function openCollectionPicker(mediaId) {
@@ -1819,7 +2111,12 @@ async function addToCollection(event) {
 }
 
 async function openStudio() {
-  if (!currentUser) return $("auth-dialog").showModal();
+  if (!currentUser) {
+    setCurrentPage("studio");
+    if (safeEl("studio-page-list")) $("studio-page-list").innerHTML = `<p class="muted">Sign in to manage your uploads and creator tools.</p>`;
+    renderPageSidebar();
+    return $("auth-dialog").showModal();
+  }
   const data = await apiFetch("/api/me/media");
   const items = data.media || [];
   const totals = items.reduce((acc, item) => {
@@ -1828,11 +2125,16 @@ async function openStudio() {
     acc.likes += Number(item.like_count || 0);
     return acc;
   }, { views: 0, downloads: 0, likes: 0 });
+  studioPageState = { items, totals };
   $("studio-posts").textContent = items.length;
   $("studio-views").textContent = totals.views;
   $("studio-downloads").textContent = totals.downloads;
   $("studio-likes").textContent = totals.likes;
-  $("studio-list").innerHTML = items.length ? items.map((item) => `
+  if (safeEl("studio-page-posts")) $("studio-page-posts").textContent = items.length;
+  if (safeEl("studio-page-views")) $("studio-page-views").textContent = totals.views;
+  if (safeEl("studio-page-downloads")) $("studio-page-downloads").textContent = totals.downloads;
+  if (safeEl("studio-page-likes")) $("studio-page-likes").textContent = totals.likes;
+  const markup = items.length ? items.map((item) => `
     <article class="studio-item">
       <button type="button" data-open="${item.id}" class="studio-thumb">
         ${renderPreview(item, "mini")}
@@ -1845,7 +2147,10 @@ async function openStudio() {
       <button type="button" data-delete-media="${item.id}">Delete</button>
     </article>
   `).join("") : `<p class="muted">You have not uploaded anything yet.</p>`;
-  if (!$("studio-dialog").open) $("studio-dialog").showModal();
+  if (safeEl("studio-list")) $("studio-list").innerHTML = markup;
+  if (safeEl("studio-page-list")) $("studio-page-list").innerHTML = markup;
+  setCurrentPage("studio");
+  renderPageSidebar();
 }
 
 async function editOwnMedia(id) {
@@ -1906,6 +2211,9 @@ async function loadPagedFeed(path, mode, page = 1, { scrollToTop = false } = {})
   galleryMode = mode;
   galleryPage = Math.max(1, Number(page) || 1);
   galleryLoading = true;
+  renderGalleryHeading();
+  renderTopbarPageState();
+  renderPageSidebar();
   setTextIfPresent("result-count", `Loading page ${galleryPage}`);
   showIfPresent("empty-state", false);
   renderGallerySkeleton();
@@ -1943,6 +2251,22 @@ async function loadLikedFeed(page = 1, options = {}) {
   return loadPagedFeed("/api/me/likes", "liked", page, options);
 }
 
+async function openDiscoverPage() {
+  galleryMode = "main";
+  setCurrentPage("discover");
+  return loadMedia(galleryPage || 1, { scrollToTop: true });
+}
+
+async function openFollowingPage() {
+  setCurrentPage("following");
+  return loadFollowingFeed(1, { scrollToTop: true });
+}
+
+async function openLikedPage() {
+  setCurrentPage("liked");
+  return loadLikedFeed(1, { scrollToTop: true });
+}
+
 function friendButtonLabel(status) {
   return {
     self: "You",
@@ -1974,28 +2298,42 @@ function userCard(user, { compact = false } = {}) {
   `;
 }
 
-async function openUserSearchDialog() {
-  $("user-search-dialog").showModal();
-  const input = $("user-search-input");
-  if (!input.value.trim() && currentUser) input.value = "";
-  input.focus();
+function activeUserSearchInput() {
+  return currentPage === "users" ? safeEl("users-page-query") : safeEl("user-search-input");
+}
+
+async function openUserSearchPage({ preserveQuery = false } = {}) {
+  setCurrentPage("users");
+  const input = activeUserSearchInput();
+  if (input && !preserveQuery && !input.value.trim()) input.value = "";
+  input?.focus();
   await searchUsers();
 }
 
 async function searchUsers() {
-  const query = $("user-search-input").value.trim();
-  const list = $("user-search-results");
+  const input = activeUserSearchInput();
+  const query = input?.value.trim() || "";
+  const resultsId = currentPage === "users" ? "users-page-results" : "user-search-results";
+  const list = safeEl(resultsId);
+  const mirror = resultsId === "users-page-results" ? safeEl("user-search-results") : safeEl("users-page-results");
   if (!query) {
-    list.innerHTML = `<p class="muted">Search by username, display name, bio, or headline.</p>`;
+    if (list) list.innerHTML = `<p class="muted">Search by username, display name, bio, or headline.</p>`;
+    if (mirror) mirror.innerHTML = list?.innerHTML || "";
+    renderPageSidebar();
     return;
   }
   try {
     const data = await apiFetch(`/api/users/search?q=${encodeURIComponent(query)}`);
     const users = data.users || [];
-    list.innerHTML = users.length ? users.map((user) => userCard(user)).join("") : `<p class="muted">No users found.</p>`;
+    const markup = users.length ? users.map((user) => userCard(user)).join("") : `<p class="muted">No users found.</p>`;
+    if (list) list.innerHTML = markup;
+    if (mirror) mirror.innerHTML = markup;
   } catch (err) {
-    list.innerHTML = `<p class="muted">${escapeHtml(err.message)}</p>`;
+    const markup = `<p class="muted">${escapeHtml(err.message)}</p>`;
+    if (list) list.innerHTML = markup;
+    if (mirror) mirror.innerHTML = markup;
   }
+  renderPageSidebar();
 }
 
 async function toggleFollowUser(userId, following = null) {
@@ -2008,6 +2346,7 @@ async function toggleFollowUser(userId, following = null) {
     body: JSON.stringify({ following: next }),
   });
   if (activeProfileUsername) await openProfile(activeProfileUsername);
+  else if (currentPage === "friends") await loadFriendPanel();
   else await searchUsers();
 }
 
@@ -2020,27 +2359,31 @@ async function sendFriendRequest(userId) {
     button.disabled = ["friends", "pending_out"].includes(status);
   });
   if (activeProfileUsername) await openProfile(activeProfileUsername);
+  else if (currentPage === "friends") await loadFriendPanel();
 }
 
 async function openProfile(username) {
   if (!username) return;
   activeProfileUsername = username;
   const data = await apiFetch(`/api/users/${encodeURIComponent(username)}/profile`);
+  profilePageData = data;
   renderProfile(data);
   if (location.hash !== `#user/${encodeURIComponent(username)}`) {
     history.replaceState(null, "", `#user/${encodeURIComponent(username)}`);
   }
-  if (!$("profile-dialog").open) $("profile-dialog").showModal();
+  setCurrentPage("profile");
 }
 
 function renderProfile(data) {
   const user = data.user || {};
+  const prefs = { ...DEFAULT_USER_SETTINGS, ...(user.user_settings || {}) };
+  const joined = user.created_at ? new Date(user.created_at).toLocaleDateString() : "";
   $("profile-dialog-title").textContent = user.display_name || user.username || "Profile";
   const tags = (user.featured_tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
   const media = data.media || [];
   const collections = data.collections || [];
   const friends = data.friends || [];
-  $("profile-view").innerHTML = `
+  const compactMarkup = `
     <section class="profile-hero" style="--profile-accent:${escapeHtml(user.profile_color || "#37c9a7")}">
       <div class="avatar large">${user.avatar_url ? `<img src="${user.avatar_url}" alt="">` : escapeHtml((user.display_name || user.username || "IG").slice(0, 2).toUpperCase())}</div>
       <div>
@@ -2062,39 +2405,87 @@ function renderProfile(data) {
       <div><strong>${Number(user.follower_count || 0)}</strong><span>Followers</span></div>
       <div><strong>${Number(user.following_count || 0)}</strong><span>Following</span></div>
       <div><strong>${Number(user.friend_count || 0)}</strong><span>Friends</span></div>
-      <div><strong>${formatBytes(user.download_count || 0)}</strong><span>Downloads</span></div>
+      <div><strong>${Number(user.download_count || 0)}</strong><span>Downloads</span></div>
       <div><strong>${Number(user.like_count || 0)}</strong><span>Likes</span></div>
     </section>
-    <section class="profile-section">
-      <div class="section-title-row"><h3>Recent Uploads</h3><span class="muted">${media.length}</span></div>
-      <div class="mini-media-grid">${media.length ? media.map((item) => `
-        <button class="mini-media" type="button" data-open="${item.id}">
-          ${renderPreview(item, "mini")}
-          <span>${adultBadge(item)}${escapeHtml(item.title)}</span>
-        </button>
-      `).join("") : `<p class="muted">No public uploads to show.</p>`}</div>
-    </section>
-    <section class="profile-section">
-      <div class="section-title-row"><h3>Collections</h3><span class="muted">${collections.length}</span></div>
-      <div class="collection-list">${collections.length ? collections.map((collection) => `
-        <article class="collection-card">
-          <button type="button" data-collection-open="${collection.id}" class="collection-cover">
-            ${collection.cover_url ? `<img src="${collection.cover_url}" alt="">` : `<span>${collection.cover_locked ? "18+" : escapeHtml(collection.name.slice(0, 2).toUpperCase())}</span>`}
-          </button>
-          <div><h3>${escapeHtml(collection.name)}</h3><p class="muted">${escapeHtml(collection.description || "No description")} · ${collection.item_count || 0} posts</p></div>
-        </article>
-      `).join("") : `<p class="muted">No public collections to show.</p>`}</div>
-    </section>
-    <section class="profile-section">
-      <div class="section-title-row"><h3>Friends</h3><span class="muted">${friends.length}</span></div>
-      <div class="user-results compact">${friends.length ? friends.map((friend) => userCard(friend, { compact: true })).join("") : `<p class="muted">No friends to show.</p>`}</div>
-    </section>
   `;
+  const expandedMarkup = `
+    <div class="profile-showcase profile-layout-${escapeHtml(prefs.profile_layout || "spotlight")} profile-card-style-${escapeHtml(prefs.profile_card_style || "glass")}" data-banner-style="${escapeHtml(prefs.profile_banner_style || "gradient")}" style="--profile-accent:${escapeHtml(user.profile_color || "#37c9a7")}">
+      <div class="profile-showcase-top">
+        <div class="avatar large">${user.avatar_url ? `<img src="${user.avatar_url}" alt="">` : escapeHtml((user.display_name || user.username || "IG").slice(0, 2).toUpperCase())}</div>
+        <div class="profile-showcase-copy">
+          <p class="page-eyebrow">Profile</p>
+          <h2>${escapeHtml(user.display_name || user.username)}</h2>
+          <p class="muted">@${escapeHtml(user.username || "")}${user.location_label ? ` · ${escapeHtml(user.location_label)}` : ""}${prefs.profile_show_joined_date !== false && joined ? ` · Joined ${escapeHtml(joined)}` : ""}</p>
+          ${user.profile_headline ? `<p class="profile-headline">${escapeHtml(user.profile_headline)}</p>` : ""}
+          ${user.bio ? `<p>${escapeHtml(user.bio)}</p>` : ""}
+          <div class="profile-ribbon">
+            ${tags || ""}
+            ${user.website_url ? `<span>Website linked</span>` : ""}
+            ${user.public_profile === false ? `<span>Private profile</span>` : ""}
+          </div>
+        </div>
+        <div class="profile-actions">
+          <button type="button" data-follow-user="${user.id}">${user.followed_by_me ? "Unfollow" : "Follow"}</button>
+          <button type="button" data-friend-user="${user.id}" ${["self", "friends", "pending_out"].includes(user.friend_status) ? "disabled" : ""}>${friendButtonLabel(user.friend_status)}</button>
+          <button type="button" data-copy-profile="${escapeHtml(user.username || "")}">Copy Link</button>
+          ${user.website_url ? `<a class="button-link" href="${escapeHtml(user.website_url)}" target="_blank" rel="noopener">Website</a>` : ""}
+          ${currentUser?.username === user.username ? `<button type="button" data-open-settings="1">Customize</button>` : ""}
+        </div>
+      </div>
+      <div class="profile-spotlight-grid">
+        <article class="profile-insight-card"><h3>Posts</h3><strong>${Number(user.media_count || 0)}</strong><span class="muted">Published uploads</span></article>
+        <article class="profile-insight-card"><h3>Followers</h3><strong>${Number(user.follower_count || 0)}</strong><span class="muted">People following this profile</span></article>
+        <article class="profile-insight-card"><h3>Likes</h3><strong>${Number(user.like_count || 0)}</strong><span class="muted">Total likes across public work</span></article>
+        <article class="profile-insight-card"><h3>Downloads</h3><strong>${Number(user.download_count || 0)}</strong><span class="muted">Downloads on public posts</span></article>
+      </div>
+    </div>
+    <div class="profile-dashboard profile-layout-${escapeHtml(prefs.profile_layout || "spotlight")} profile-card-style-${escapeHtml(prefs.profile_card_style || "glass")}">
+      <div class="profile-column">
+        <section class="profile-section-card">
+          <header><h3>Recent Uploads</h3><span class="muted">${media.length}</span></header>
+          <div class="mini-media-grid">${media.length ? media.map((item) => `
+            <button class="mini-media" type="button" data-open="${item.id}">
+              ${renderPreview(item, "mini")}
+              <span>${adultBadge(item)}${escapeHtml(item.title)}</span>
+            </button>
+          `).join("") : `<p class="muted">No public uploads to show.</p>`}</div>
+        </section>
+        <section class="profile-section-card">
+          <header><h3>Collections</h3><span class="muted">${collections.length}</span></header>
+          <div class="profile-collection-grid">${collections.length ? collections.map((collection) => collectionCardMarkup(collection)).join("") : `<p class="muted">No public collections to show.</p>`}</div>
+        </section>
+      </div>
+      <aside class="profile-rail">
+        <section class="profile-section-card">
+          <header><h3>Friends</h3><span class="muted">${friends.length}</span></header>
+          <div class="profile-friend-grid">${friends.length ? friends.map((friend) => userCard(friend, { compact: true })).join("") : `<p class="muted">No friends to show.</p>`}</div>
+        </section>
+        <section class="profile-section-card">
+          <header><h3>Profile Details</h3></header>
+          <div class="profile-ribbon">
+            <span>${Number(user.following_count || 0)} following</span>
+            <span>${Number(user.friend_count || 0)} friends</span>
+            ${user.location_label ? `<span>${escapeHtml(user.location_label)}</span>` : ""}
+          </div>
+        </section>
+      </aside>
+    </div>
+  `;
+  if (safeEl("profile-view")) $("profile-view").innerHTML = compactMarkup;
+  if (safeEl("profile-page-view")) $("profile-page-view").innerHTML = expandedMarkup;
+  renderPageSidebar();
 }
 
-async function openFriendsDialog() {
-  if (!currentUser) return $("auth-dialog").showModal();
-  $("friends-dialog").showModal();
+async function openFriendsPage() {
+  setCurrentPage("friends");
+  if (!currentUser) {
+    if (safeEl("friends-page-requests")) $("friends-page-requests").innerHTML = `<p class="muted">Sign in to manage incoming friend requests.</p>`;
+    if (safeEl("friends-page-outgoing")) $("friends-page-outgoing").innerHTML = `<p class="muted">Outgoing invites appear here after you sign in.</p>`;
+    if (safeEl("friends-page-list")) $("friends-page-list").innerHTML = `<p class="muted">Your accepted friends list will appear here.</p>`;
+    renderPageSidebar();
+    return $("auth-dialog").showModal();
+  }
   await loadFriendPanel();
 }
 
@@ -2103,6 +2494,7 @@ async function loadFriendPanel() {
   const friends = await apiFetch("/api/me/friends");
   const incoming = requests.incoming || [];
   const outgoing = requests.outgoing || [];
+  friendPanelState = { incoming, outgoing, friends: friends.friends || [] };
   $("friend-requests-list").innerHTML = `
     ${incoming.length ? `<h3>Incoming</h3>${incoming.map((item) => `
       <article class="user-card">
@@ -2121,6 +2513,26 @@ async function loadFriendPanel() {
     `).join("")}` : ""}
   `;
   $("friends-list").innerHTML = (friends.friends || []).length ? friends.friends.map((friend) => userCard(friend, { compact: true })).join("") : `<p class="muted">No friends yet.</p>`;
+  if (safeEl("friends-page-requests")) $("friends-page-requests").innerHTML = incoming.length ? incoming.map((item) => `
+    <article class="user-card">
+      ${userCard(item.user, { compact: true })}
+      <div class="user-card-actions">
+        <button type="button" data-friend-action="accept" data-request-id="${item.id}">Accept</button>
+        <button type="button" data-friend-action="decline" data-request-id="${item.id}">Decline</button>
+      </div>
+    </article>
+  `).join("") : `<p class="muted">No incoming friend requests.</p>`;
+  if (safeEl("friends-page-outgoing")) $("friends-page-outgoing").innerHTML = outgoing.length ? outgoing.map((item) => `
+    <article class="user-card">
+      ${userCard(item.user, { compact: true })}
+      <div class="user-card-actions"><button type="button" data-friend-action="cancel" data-request-id="${item.id}">Cancel</button></div>
+    </article>
+  `).join("") : `<p class="muted">No outgoing friend requests.</p>`;
+  if (safeEl("friends-page-list")) $("friends-page-list").innerHTML = (friends.friends || []).length ? friends.friends.map((friend) => userCard(friend, { compact: true })).join("") : `<p class="muted">No friends yet.</p>`;
+  setTextIfPresent("friends-page-request-count", incoming.length);
+  setTextIfPresent("friends-page-outgoing-count", outgoing.length);
+  setTextIfPresent("friends-page-list-count", (friends.friends || []).length);
+  renderPageSidebar();
 }
 
 async function respondFriendRequest(requestId, action) {
@@ -2553,11 +2965,11 @@ function bindKeyboardShortcuts() {
     } else if (event.key === "ArrowLeft") {
       if (safeEl("slideshow-dialog")?.open) moveSlideshow(-1);
       else if (safeEl("detail-dialog")?.open) await openAdjacentDetail(-1);
-      else if (galleryPage > 1) await loadCurrentGalleryPage(galleryPage - 1, { scrollToTop: true });
+      else if (["discover", "following", "liked"].includes(currentPage) && galleryPage > 1) await loadCurrentGalleryPage(galleryPage - 1, { scrollToTop: true });
     } else if (event.key === "ArrowRight") {
       if (safeEl("slideshow-dialog")?.open) moveSlideshow(1);
       else if (safeEl("detail-dialog")?.open) await openAdjacentDetail(1);
-      else if (galleryHasNext) await loadCurrentGalleryPage(galleryPage + 1, { scrollToTop: true });
+      else if (["discover", "following", "liked"].includes(currentPage) && galleryHasNext) await loadCurrentGalleryPage(galleryPage + 1, { scrollToTop: true });
     }
   });
 }
@@ -2596,6 +3008,7 @@ function bindEvents() {
   on("account-name", "click", () => openCurrentUserDestination(ACCOUNT_NAVIGATION.sidebarProfileTarget));
   $("settings-email-save").addEventListener("click", saveEmailAndSendCode);
   $("settings-email-verify").addEventListener("click", verifyEmailCode);
+  on("discover-open", "click", openDiscoverPage);
   $("surprise-open").addEventListener("click", openSurprise);
   on("slideshow-open", "click", openSlideshow);
   on("slideshow-close", "click", closeSlideshow);
@@ -2648,14 +3061,18 @@ function bindEvents() {
   });
   on("share-view", "click", shareCurrentView);
   on("shortcuts-open", "click", showKeyboardShortcuts);
-  on("users-open", "click", openUserSearchDialog);
+  on("users-open", "click", () => openUserSearchPage());
   on("profile-open", "click", () => currentUser && openProfile(currentUser.username));
   on("user-search-close", "click", () => $("user-search-dialog").close());
   on("user-search-input", "input", () => {
     clearTimeout(window.__userSearchTimer);
     window.__userSearchTimer = setTimeout(searchUsers, 180);
   });
-  on("friends-open", "click", openFriendsDialog);
+  on("users-page-query", "input", () => {
+    clearTimeout(window.__userSearchTimer);
+    window.__userSearchTimer = setTimeout(searchUsers, 180);
+  });
+  on("friends-open", "click", openFriendsPage);
   on("friends-close", "click", () => $("friends-dialog").close());
   on("friend-tab-incoming", "click", () => {
     showIfPresent("friend-requests-list", true);
@@ -2665,13 +3082,37 @@ function bindEvents() {
     showIfPresent("friend-requests-list", false);
     showIfPresent("friends-list", true);
   });
-  on("following-feed", "click", loadFollowingFeed);
-  on("liked-feed", "click", loadLikedFeed);
+  on("following-feed", "click", openFollowingPage);
+  on("liked-feed", "click", openLikedPage);
   on("live-checks-open", "click", () => runLiveChecks({ silent: false }));
-  $("collections-open").addEventListener("click", openCollectionsDialog);
+  $("collections-open").addEventListener("click", () => openCollectionsPage());
   $("collections-close").addEventListener("click", () => $("collections-dialog").close());
   if ($("collection-picker-close")) $("collection-picker-close").addEventListener("click", () => $("collection-picker-dialog").close());
-  $("collection-form").addEventListener("submit", createCollection);
+  $("collection-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await createCollectionFromInputs({
+      name: $("collection-name").value,
+      description: $("collection-description").value,
+      isPublic: $("collection-public").checked,
+      noticeId: "collections-error",
+    });
+    $("collection-form").reset();
+    $("collection-public").checked = true;
+  });
+  on("collections-page-form", "submit", async (event) => {
+    event.preventDefault();
+    await createCollectionFromInputs({
+      name: $("collections-page-name").value,
+      description: $("collections-page-description").value,
+      isPublic: $("collections-page-public").checked,
+      noticeId: "collections-page-error",
+    });
+    $("collections-page-form").reset();
+    $("collections-page-public").checked = true;
+  });
+  on("collections-page-community", "click", () => openCollectionsPage({ mine: false }));
+  on("collections-page-mine", "click", () => openCollectionsPage({ mine: true }));
+  on("collections-page-refresh", "click", () => openCollectionsPage({ mine: collectionsMineMode, preserveSelection: true }));
   $("collection-picker-form").addEventListener("submit", addToCollection);
   $("studio-open").addEventListener("click", openStudio);
   $("studio-close").addEventListener("click", () => $("studio-dialog").close());
@@ -2754,6 +3195,14 @@ function bindEvents() {
     renderActiveFilters();
     window.__gallerySearchTimer = setTimeout(() => loadMedia(1), SEARCH_DEBOUNCE_MS);
   });
+  on("users-page-results", "click", async (event) => {
+    const profile = event.target.closest("[data-profile]");
+    const follow = event.target.closest("[data-follow-user]");
+    const friend = event.target.closest("[data-friend-user]");
+    if (profile) await openProfile(profile.dataset.profile);
+    if (follow) await toggleFollowUser(follow.dataset.followUser);
+    if (friend) await sendFriendRequest(friend.dataset.friendUser);
+  });
   $("gallery-grid").addEventListener("click", async (event) => {
     const open = event.target.closest("[data-open]");
     const profile = event.target.closest("[data-profile]");
@@ -2796,6 +3245,16 @@ function bindEvents() {
     if (follow) await toggleFollowUser(follow.dataset.followUser);
     if (friend) await sendFriendRequest(friend.dataset.friendUser);
   });
+  on("friends-page", "click", async (event) => {
+    const action = event.target.closest("[data-friend-action]");
+    const profile = event.target.closest("[data-profile]");
+    const follow = event.target.closest("[data-follow-user]");
+    const friend = event.target.closest("[data-friend-user]");
+    if (action) await respondFriendRequest(action.dataset.requestId, action.dataset.friendAction);
+    if (profile) await openProfile(profile.dataset.profile);
+    if (follow) await toggleFollowUser(follow.dataset.followUser);
+    if (friend) await sendFriendRequest(friend.dataset.friendUser);
+  });
   $("profile-close").addEventListener("click", () => {
     activeProfileUsername = "";
     if (location.hash.startsWith("#user/")) history.replaceState(null, "", location.pathname + location.search);
@@ -2818,11 +3277,38 @@ function bindEvents() {
     if (friend) await sendFriendRequest(friend.dataset.friendUser);
     if (copyProfile) await copyProfileLink(copyProfile.dataset.copyProfile);
   });
+  on("profile-page-view", "click", async (event) => {
+    const open = event.target.closest("[data-open]");
+    const collection = event.target.closest("[data-collection-open]");
+    const profile = event.target.closest("[data-profile]");
+    const follow = event.target.closest("[data-follow-user]");
+    const friend = event.target.closest("[data-friend-user]");
+    const copyProfile = event.target.closest("[data-copy-profile]");
+    const settings = event.target.closest("[data-open-settings]");
+    if (open && !handleAdultOpen(open.dataset.open)) await openDetail(open.dataset.open);
+    if (collection) {
+      await openCollectionsPage({ mine: collectionsMineMode, preserveSelection: true });
+      await openCollection(collection.dataset.collectionOpen);
+    }
+    if (profile) await openProfile(profile.dataset.profile);
+    if (follow) await toggleFollowUser(follow.dataset.followUser);
+    if (friend) await sendFriendRequest(friend.dataset.friendUser);
+    if (copyProfile) await copyProfileLink(copyProfile.dataset.copyProfile);
+    if (settings) openSettingsPanel();
+  });
   $("collections-list").addEventListener("click", async (event) => {
     const open = event.target.closest("[data-collection-open]");
     if (open) await openCollection(open.dataset.collectionOpen);
   });
+  on("collections-page-list", "click", async (event) => {
+    const open = event.target.closest("[data-collection-open]");
+    if (open) await openCollection(open.dataset.collectionOpen);
+  });
   $("collection-media").addEventListener("click", async (event) => {
+    const open = event.target.closest("[data-open]");
+    if (open && !handleAdultOpen(open.dataset.open)) await openDetail(open.dataset.open);
+  });
+  on("collections-page-detail", "click", async (event) => {
     const open = event.target.closest("[data-open]");
     if (open && !handleAdultOpen(open.dataset.open)) await openDetail(open.dataset.open);
   });
@@ -2837,6 +3323,16 @@ function bindEvents() {
     if (open && !handleAdultOpen(open.dataset.open)) await openDetail(open.dataset.open);
   });
   $("studio-list").addEventListener("click", async (event) => {
+    const open = event.target.closest("[data-open]");
+    const edit = event.target.closest("[data-edit-media]");
+    const del = event.target.closest("[data-delete-media]");
+    const restore = event.target.closest("[data-restore-media]");
+    if (open && !handleAdultOpen(open.dataset.open)) await openDetail(open.dataset.open);
+    if (edit) await editOwnMedia(edit.dataset.editMedia);
+    if (del) await deleteOwnMedia(del.dataset.deleteMedia);
+    if (restore) await restoreOwnMedia(restore.dataset.restoreMedia);
+  });
+  on("studio-page-list", "click", async (event) => {
     const open = event.target.closest("[data-open]");
     const edit = event.target.closest("[data-edit-media]");
     const del = event.target.closest("[data-delete-media]");
@@ -2886,9 +3382,14 @@ function bindEvents() {
 
 async function boot() {
   bindEvents();
+  setCurrentPage("discover");
   renderAuth();
   updateCompareUi();
   startSilentChecks();
+  window.addEventListener("hashchange", async () => {
+    const hashProfile = decodeURIComponent(location.hash || "").match(/^#user\/(.+)/)?.[1];
+    if (hashProfile) await openProfile(hashProfile);
+  });
   const hasBackendConfig = await initApiOrigin();
   if (REMOTE_MODE && !hasBackendConfig) return;
   try {

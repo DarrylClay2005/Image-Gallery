@@ -133,11 +133,15 @@ class SettingsUpdateRequest(BaseModel):
     grid_density: str | None = None
     default_sort: str | None = None
     items_per_page: int | None = None
+    profile_layout: str | None = None
+    profile_banner_style: str | None = None
+    profile_card_style: str | None = None
     autoplay_previews: bool | None = None
     muted_previews: bool | None = None
     reduce_motion: bool | None = None
     open_original_in_new_tab: bool | None = None
     blur_video_previews: bool | None = None
+    profile_show_joined_date: bool | None = None
     profile_show_uploads: bool | None = None
     profile_show_collections: bool | None = None
     profile_show_friends: bool | None = None

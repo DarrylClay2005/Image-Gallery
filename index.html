@@ -15,6 +15,7 @@
     </a>
     <div class="topbar-actions">
       <span id="connection-status" class="status-pill" hidden>Connecting</span>
+      <button id="discover-open" type="button">Discover</button>
       <button id="surprise-open" type="button">Surprise</button>
       <button id="collections-open" type="button">Collections</button>
       <button id="users-open" type="button">Users</button>
@@ -33,7 +34,7 @@
 
   <main class="layout">
     <aside class="sidebar">
-      <div class="sidebar-block">
+      <div class="sidebar-block discover-sidebar-block">
         <label class="field">
           <span>Search</span>
           <input id="search" type="search" placeholder="wallpaper, meme, vaporwave" />
@@ -63,7 +64,7 @@
           </select>
         </label>
       </div>
-      <details class="sidebar-block advanced-filters" open>
+      <details class="sidebar-block advanced-filters discover-sidebar-block" open>
         <summary>Advanced Filters</summary>
         <label class="field">
           <span>Uploader</span>
@@ -98,13 +99,13 @@
           </select>
         </label>
       </details>
-      <div class="stats-grid">
+      <div class="stats-grid discover-sidebar-block">
         <div><strong id="stat-media">0</strong><span>Posts</span></div>
         <div><strong id="stat-likes">0</strong><span>Likes</span></div>
         <div><strong id="stat-users">0</strong><span>Users</span></div>
         <div><strong id="stat-bytes">0 MB</strong><span>Stored</span></div>
       </div>
-      <div class="sidebar-block tag-panel">
+      <div class="sidebar-block tag-panel discover-sidebar-block">
         <div class="side-title-row">
           <strong>Tags</strong>
           <button id="clear-tag" type="button">Clear</button>
@@ -119,37 +120,134 @@
           <button id="resend-email-verification" type="button" hidden>Resend Email Verification</button>
         </div>
       </div>
+      <div id="page-sidebar" class="page-sidebar-stack"></div>
     </aside>
 
     <section class="content">
-      <div class="content-head">
-        <div>
-          <h1>Fresh Drops</h1>
-          <p id="result-count" class="muted">Loading gallery</p>
+      <section id="discover-page" class="app-page">
+        <div class="content-head">
+          <div>
+            <p id="page-eyebrow" class="page-eyebrow">Discover</p>
+            <h1 id="page-title">Fresh Drops</h1>
+            <p id="result-count" class="muted">Loading gallery</p>
+          </div>
+          <div class="content-actions">
+            <button id="slideshow-open" type="button">Slideshow</button>
+            <button id="compare-open" type="button">Compare</button>
+            <button id="insights-open" type="button">Insights</button>
+            <button id="select-page" type="button">Select Page</button>
+            <button id="saved-views-open" type="button">Views</button>
+            <button id="save-view" type="button">Save View</button>
+            <button id="share-view" type="button">Share View</button>
+            <button id="shortcuts-open" type="button">Shortcuts</button>
+            <button id="refresh" type="button">Refresh</button>
+          </div>
         </div>
-        <div class="content-actions">
-          <button id="slideshow-open" type="button">Slideshow</button>
-          <button id="compare-open" type="button">Compare</button>
-          <button id="insights-open" type="button">Insights</button>
-          <button id="select-page" type="button">Select Page</button>
-          <button id="saved-views-open" type="button">Views</button>
-          <button id="save-view" type="button">Save View</button>
-          <button id="share-view" type="button">Share View</button>
-          <button id="shortcuts-open" type="button">Shortcuts</button>
-          <button id="refresh" type="button">Refresh</button>
+        <div id="active-filters" class="active-filters" hidden></div>
+        <div id="gallery-grid" class="gallery-grid"></div>
+        <nav id="gallery-pagination" class="gallery-pagination" aria-label="Gallery pages" hidden>
+          <button id="gallery-prev" type="button">Previous</button>
+          <span id="gallery-page-status" class="muted">Page 1</span>
+          <button id="gallery-next" type="button">Next</button>
+        </nav>
+        <div id="empty-state" class="empty-state" hidden>
+          <h2 id="empty-title">Checking gallery</h2>
+          <p id="empty-message">Loading posts and live status.</p>
         </div>
-      </div>
-      <div id="active-filters" class="active-filters" hidden></div>
-      <div id="gallery-grid" class="gallery-grid"></div>
-      <nav id="gallery-pagination" class="gallery-pagination" aria-label="Gallery pages" hidden>
-        <button id="gallery-prev" type="button">Previous</button>
-        <span id="gallery-page-status" class="muted">Page 1</span>
-        <button id="gallery-next" type="button">Next</button>
-      </nav>
-      <div id="empty-state" class="empty-state" hidden>
-        <h2 id="empty-title">Checking gallery</h2>
-        <p id="empty-message">Loading posts and live status.</p>
-      </div>
+      </section>
+
+      <section id="collections-page" class="app-page" hidden>
+        <div class="page-hero">
+          <div>
+            <p class="page-eyebrow">Collections</p>
+            <h1>Curated Stacks</h1>
+            <p id="collections-page-subtitle" class="muted">Browse community-made groups and your own private sets without opening a pile of overlapping panels.</p>
+          </div>
+          <div class="page-hero-actions">
+            <button id="collections-page-community" type="button">Community</button>
+            <button id="collections-page-mine" type="button">Mine</button>
+            <button id="collections-page-refresh" type="button">Refresh</button>
+          </div>
+        </div>
+        <div id="collections-page-error" class="notice error" hidden></div>
+        <div class="page-split collections-page-grid">
+          <section class="page-panel">
+            <form id="collections-page-form" class="collection-form" hidden>
+              <input id="collections-page-name" maxlength="100" placeholder="New collection name" />
+              <input id="collections-page-description" maxlength="500" placeholder="Description" />
+              <label><input id="collections-page-public" type="checkbox" checked /> Public</label>
+              <button class="primary" type="submit">Create</button>
+            </form>
+            <div id="collections-page-list" class="collection-list"></div>
+          </section>
+          <section class="page-panel">
+            <div id="collections-page-detail" class="collection-detail-panel">
+              <div class="empty-state page-empty-state">
+                <h2>Select a collection</h2>
+                <p>Its post rail, visibility, and owner info will appear here.</p>
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="users-page" class="app-page" hidden>
+        <div class="page-hero">
+          <div>
+            <p class="page-eyebrow">People</p>
+            <h1>User Directory</h1>
+            <p class="muted">Search profiles, headline tags, bios, and activity without hiding the rest of the app under a modal.</p>
+          </div>
+        </div>
+        <label class="field page-search-field">
+          <span>Search users</span>
+          <input id="users-page-query" type="search" placeholder="username, display name, profile tag" />
+        </label>
+        <div id="users-page-results" class="user-results page-results-grid"></div>
+      </section>
+
+      <section id="friends-page" class="app-page" hidden>
+        <div class="page-hero">
+          <div>
+            <p class="page-eyebrow">Social</p>
+            <h1>Friends Hub</h1>
+            <p class="muted">Incoming requests, outgoing invites, and your current circle all get dedicated space now.</p>
+          </div>
+        </div>
+        <div class="friends-page-grid">
+          <section class="page-panel">
+            <div class="section-title-row"><h3>Requests</h3><span id="friends-page-request-count" class="muted">0</span></div>
+            <div id="friends-page-requests" class="user-results"></div>
+            <div class="section-title-row outgoing-title"><h3>Outgoing</h3><span id="friends-page-outgoing-count" class="muted">0</span></div>
+            <div id="friends-page-outgoing" class="user-results"></div>
+          </section>
+          <section class="page-panel">
+            <div class="section-title-row"><h3>Friends</h3><span id="friends-page-list-count" class="muted">0</span></div>
+            <div id="friends-page-list" class="user-results"></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="studio-page" class="app-page" hidden>
+        <div class="page-hero">
+          <div>
+            <p class="page-eyebrow">Creator</p>
+            <h1>Studio</h1>
+            <p class="muted">Manage your uploads, see totals, and keep everything in one dashboard instead of a cramped modal.</p>
+          </div>
+        </div>
+        <div class="studio-summary page-stats">
+          <div><strong id="studio-page-posts">0</strong><span>Posts</span></div>
+          <div><strong id="studio-page-views">0</strong><span>Views</span></div>
+          <div><strong id="studio-page-downloads">0</strong><span>Downloads</span></div>
+          <div><strong id="studio-page-likes">0</strong><span>Likes</span></div>
+        </div>
+        <div id="studio-page-list" class="studio-list"></div>
+      </section>
+
+      <section id="profile-page" class="app-page profile-page-shell" hidden>
+        <div id="profile-page-view" class="profile-view expanded-profile-view"></div>
+      </section>
     </section>
   </main>
 
@@ -426,6 +524,30 @@
             <span>Items per page</span>
             <input id="pref-items-per-page" type="number" min="15" max="15" step="1" value="15" readonly />
           </label>
+          <label class="field">
+            <span>Profile layout</span>
+            <select id="pref-profile-layout">
+              <option value="spotlight">Spotlight</option>
+              <option value="magazine">Magazine</option>
+              <option value="stack">Stacked</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Profile banner</span>
+            <select id="pref-profile-banner-style">
+              <option value="gradient">Gradient</option>
+              <option value="mesh">Mesh</option>
+              <option value="frame">Framed</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Profile cards</span>
+            <select id="pref-profile-card-style">
+              <option value="glass">Glass</option>
+              <option value="solid">Solid</option>
+              <option value="outline">Outline</option>
+            </select>
+          </label>
         </div>
         <div class="toggle-row">
           <label><input id="pref-autoplay-previews" type="checkbox" /> Autoplay previews</label>
@@ -433,6 +555,7 @@
           <label><input id="pref-reduce-motion" type="checkbox" /> Reduce motion</label>
           <label><input id="pref-open-original" type="checkbox" /> Open originals in a new tab</label>
           <label><input id="pref-blur-video-previews" type="checkbox" /> Blur video previews</label>
+          <label><input id="pref-profile-show-joined-date" type="checkbox" checked /> Show joined date on profiles</label>
         </div>
       </section>
       <section class="settings-section">
