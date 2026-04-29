@@ -11,13 +11,23 @@ TUNNEL_LOG="${LOG_DIR}/cloudflared-service.log"
 UVICORN_LOG="${LOG_DIR}/uvicorn-service-fallback.log"
 AUTO_PUSH_CONFIG="${GALLERY_AUTO_PUSH_CONFIG:-1}"
 ALLOW_FALLBACK_BACKEND="${GALLERY_SERVICE_START_BACKEND_IF_MISSING:-1}"
-TUNNEL_PROVIDER="${GALLERY_TUNNEL_PROVIDER:-auto}"
+TUNNEL_PROVIDER="${GALLERY_TUNNEL_PROVIDER:-cloudflare}"
 PAGES_ORIGIN="${GALLERY_PAGES_ORIGIN:-https://darrylclay2005.github.io}"
 PAGES_URL="${GALLERY_PAGES_PUBLIC_URL:-https://darrylclay2005.github.io/Image-Gallery/}"
 MAX_TUNNEL_START_ATTEMPTS="${GALLERY_MAX_TUNNEL_START_ATTEMPTS:-12}"
-TUNNEL_READY_ATTEMPTS="${GALLERY_TUNNEL_READY_ATTEMPTS:-180}"
+TUNNEL_READY_ATTEMPTS="${GALLERY_TUNNEL_READY_ATTEMPTS:-900}"
+QUICK_TUNNEL_URL_ATTEMPTS="${GALLERY_QUICK_TUNNEL_URL_ATTEMPTS:-180}"
+CLOUDFLARE_PROTOCOL="${GALLERY_CLOUDFLARE_PROTOCOL:-quic}"
+CLOUDFLARE_TUNNEL_TOKEN="${GALLERY_CLOUDFLARE_TUNNEL_TOKEN:-}"
+CLOUDFLARE_PUBLIC_URL="${GALLERY_CLOUDFLARE_PUBLIC_URL:-}"
+GLOBAL_TUNNEL_STATE_DIR="${HOME}/.local/state/cloudflare-quick-tunnels"
+GLOBAL_TUNNEL_LOCK_FILE="${GLOBAL_TUNNEL_STATE_DIR}/create.lock"
+GLOBAL_TUNNEL_NEXT_ALLOWED_FILE="${GLOBAL_TUNNEL_STATE_DIR}/next-allowed-epoch"
+GLOBAL_SUCCESS_COOLDOWN_SECONDS="${GALLERY_CLOUDFLARE_SUCCESS_COOLDOWN_SECONDS:-180}"
+GLOBAL_FAILURE_COOLDOWN_SECONDS="${GALLERY_CLOUDFLARE_FAILURE_COOLDOWN_SECONDS:-300}"
+GLOBAL_RATE_LIMIT_COOLDOWN_SECONDS="${GALLERY_CLOUDFLARE_RATE_LIMIT_COOLDOWN_SECONDS:-900}"
 
-mkdir -p "${BIN_DIR}" "${LOG_DIR}"
+mkdir -p "${BIN_DIR}" "${LOG_DIR}" "${GLOBAL_TUNNEL_STATE_DIR}"
 
 local_urls_json() {
   PORT="${PORT}" python3 <<'PY'
@@ -117,7 +127,7 @@ publish_config() {
   echo "Publishing updated live-config.json to GitHub Pages..."
   run_git add live-config.json
   run_git commit -m "Update live backend URL" -- live-config.json || true
-  GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false run_git push origin main || echo "Could not push live-config.json automatically. Push it manually when convenient." >&2
+  GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false run_git push origin main || echo "Could not push live-config.json automatically." >&2
 }
 
 publish_offline_config() {
@@ -217,93 +227,176 @@ start_fallback_backend() {
   UVICORN_PID="$!"
 }
 
+release_global_tunnel_slot() {
+  if [[ -n "${GLOBAL_TUNNEL_SLOT_FD:-}" ]]; then
+    flock -u "${GLOBAL_TUNNEL_SLOT_FD}" || true
+    eval "exec ${GLOBAL_TUNNEL_SLOT_FD}>&-"
+    GLOBAL_TUNNEL_SLOT_FD=""
+  fi
+}
+
 cleanup() {
+  release_global_tunnel_slot
   if [[ -n "${PUBLISHED_GALLERY_URL:-}" ]] && grep -Fq "\"gallery_url\": \"${PUBLISHED_GALLERY_URL}\"" "${CONFIG_FILE}" 2>/dev/null; then
     write_offline_config
     publish_config
   fi
-  if [[ -n "${TUNNEL_PID:-}" ]]; then kill "${TUNNEL_PID}" >/dev/null 2>&1 || true; fi
-  if [[ -n "${UVICORN_PID:-}" ]]; then kill "${UVICORN_PID}" >/dev/null 2>&1 || true; fi
+  if [[ -n "${TUNNEL_PID:-}" ]]; then
+    kill "${TUNNEL_PID}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${UVICORN_PID:-}" ]]; then
+    kill "${UVICORN_PID}" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT INT TERM
 
 tunnel_retry_delay() {
   local attempt="$1"
-  if (( attempt <= 3 )); then
-    echo 15
-  elif (( attempt <= 6 )); then
+  if (( attempt <= 2 )); then
     echo 30
+  elif (( attempt <= 5 )); then
+    echo 90
   else
-    echo 60
+    echo 180
   fi
+}
+
+tunnel_was_rate_limited() {
+  grep -Fq 'status_code="429 Too Many Requests"' "${TUNNEL_LOG}" 2>/dev/null
 }
 
 log_tunnel_failure_details() {
   echo "Tunnel exited early. Last log lines:" >&2
   tail -80 "${TUNNEL_LOG}" >&2 || true
-  if grep -Fq 'status_code="429 Too Many Requests"' "${TUNNEL_LOG}" 2>/dev/null; then
+  if tunnel_was_rate_limited; then
     echo "Cloudflare quick tunnel creation is being rate-limited. Waiting before retrying." >&2
   fi
 }
 
-publish_live_url() {
+set_global_tunnel_cooldown() {
+  local seconds="$1"
+  printf '%s\n' "$(( $(date +%s) + seconds ))" > "${GLOBAL_TUNNEL_NEXT_ALLOWED_FILE}"
+}
+
+acquire_global_tunnel_slot() {
+  mkdir -p "${GLOBAL_TUNNEL_STATE_DIR}"
+  exec {GLOBAL_TUNNEL_SLOT_FD}> "${GLOBAL_TUNNEL_LOCK_FILE}"
+  flock "${GLOBAL_TUNNEL_SLOT_FD}"
+  local next_allowed=0 now wait_seconds
+  if [[ -f "${GLOBAL_TUNNEL_NEXT_ALLOWED_FILE}" ]]; then
+    read -r next_allowed < "${GLOBAL_TUNNEL_NEXT_ALLOWED_FILE}" || next_allowed=0
+  fi
+  now="$(date +%s)"
+  if (( next_allowed > now )); then
+    wait_seconds="$(( next_allowed - now ))"
+    echo "Cloudflare quick tunnel cooldown active; waiting ${wait_seconds}s before requesting a new public URL."
+    sleep "${wait_seconds}"
+  fi
+}
+
+resolve_public_ipv4s() {
+  local host="$1"
+  if command -v dig >/dev/null 2>&1; then
+    dig +short @1.1.1.1 "${host}" A 2>/dev/null | awk 'NF'
+    return
+  fi
+  if command -v getent >/dev/null 2>&1; then
+    getent ahostsv4 "${host}" 2>/dev/null | awk '{print $1}' | sort -u
+  fi
+}
+
+cloudflare_url_ready() {
+  local public_url="$1"
+  local health_path="$2"
+  local host="${public_url#https://}"
+  host="${host%%/*}"
+
+  if curl -fsS --max-time 10 "${public_url}${health_path}" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local ip
+  while IFS= read -r ip; do
+    [[ -z "${ip}" ]] && continue
+    if curl -gfsS --max-time 10 --resolve "${host}:443:${ip}" "${public_url}${health_path}" >/dev/null 2>&1; then
+      return 0
+    fi
+  done < <(resolve_public_ipv4s "${host}")
+
+  return 1
+}
+
+announce_live_url() {
   local gallery_url="$1"
+  if [[ "${PUBLISHED_GALLERY_URL:-}" == "${gallery_url}" ]]; then
+    return
+  fi
   write_config "${gallery_url}"
   PUBLISHED_GALLERY_URL="${gallery_url}"
   publish_config
   echo "Live backend URL: ${gallery_url}"
   echo "GitHub Pages frontend: ${PAGES_URL}"
-  wait "${TUNNEL_PID}"
-  exit $?
 }
 
-start_pinggy_tunnel() {
-  echo "Opening Pinggy tunnel to http://127.0.0.1:${PORT}"
-  install_python_deps
-  : > "${TUNNEL_LOG}"
-  "${VENV_DIR}/bin/python" "${ROOT_DIR}/scripts/start_pinggy_tunnel.py" --port "${PORT}" >"${TUNNEL_LOG}" 2>&1 &
-  TUNNEL_PID="$!"
-  GALLERY_URL=""
-  for _ in {1..60}; do
-    if ! kill -0 "${TUNNEL_PID}" >/dev/null 2>&1; then
-      echo "Pinggy tunnel exited early. Last log lines:" >&2
-      tail -80 "${TUNNEL_LOG}" >&2 || true
-      return 1
+wait_for_public_readiness() {
+  local gallery_url="$1"
+  local health_path="$2"
+  local ready_attempt
+  for ((ready_attempt=1; ready_attempt<=TUNNEL_READY_ATTEMPTS; ready_attempt++)); do
+    if cloudflare_url_ready "${gallery_url}" "${health_path}"; then
+      echo "Cloudflare public URL is answering: ${gallery_url}"
+      return 0
     fi
-    GALLERY_URL="$(grep -Eo 'https://[^[:space:]]+\\.pinggy-free\\.link' "${TUNNEL_LOG}" | tail -1 || true)"
-    if [[ -n "${GALLERY_URL}" ]]; then
-      echo "Waiting for ${GALLERY_URL} to answer through Pinggy..."
-      for ((ready_attempt=1; ready_attempt<=TUNNEL_READY_ATTEMPTS; ready_attempt++)); do
-        if curl -fsS --max-time 10 "${GALLERY_URL}/api/health" >/dev/null 2>&1; then
-          publish_live_url "${GALLERY_URL}"
-        fi
-        sleep 1
-      done
-      echo "Pinggy URL was created but never became reachable. Last log lines:" >&2
-      tail -80 "${TUNNEL_LOG}" >&2 || true
-      kill "${TUNNEL_PID}" >/dev/null 2>&1 || true
+    if ! kill -0 "${TUNNEL_PID}" >/dev/null 2>&1; then
       return 1
     fi
     sleep 1
   done
-  echo "Timed out waiting for Pinggy tunnel URL. Last log lines:" >&2
-  tail -80 "${TUNNEL_LOG}" >&2 || true
-  kill "${TUNNEL_PID}" >/dev/null 2>&1 || true
-  return 1
+  echo "Cloudflare has not answered yet for ${gallery_url}, but the tunnel is still running. Keeping it alive to give propagation more time."
+  return 0
+}
+
+start_named_cloudflare_tunnel() {
+  local public_url="$1"
+  local token="$2"
+  local health_path="$3"
+
+  if [[ -z "${token}" || -z "${public_url}" ]]; then
+    return 1
+  fi
+
+  echo "Starting named Cloudflare tunnel for ${public_url}"
+  : > "${TUNNEL_LOG}"
+  "${CLOUDFLARED}" tunnel --no-autoupdate run --token "${token}" >"${TUNNEL_LOG}" 2>&1 &
+  TUNNEL_PID="$!"
+
+  announce_live_url "${public_url}"
+  wait_for_public_readiness "${public_url}" "${health_path}" || {
+    echo "Named Cloudflare tunnel exited before it became reachable." >&2
+    tail -80 "${TUNNEL_LOG}" >&2 || true
+    return 1
+  }
+
+  wait "${TUNNEL_PID}"
+  exit $?
 }
 
 CLOUDFLARED="$(cloudflared_bin)"
 
 echo "Waiting for Image Gallery backend on http://127.0.0.1:${PORT}"
 for _ in {1..45}; do
-  if backend_ready; then break; fi
+  if backend_ready; then
+    break
+  fi
   sleep 2
 done
 
 if ! backend_ready; then
   start_fallback_backend || true
   for _ in {1..60}; do
-    if backend_ready; then break; fi
+    if backend_ready; then
+      break
+    fi
     if [[ -n "${UVICORN_PID:-}" ]] && ! kill -0 "${UVICORN_PID}" >/dev/null 2>&1; then
       echo "Fallback backend exited early. Last log lines:" >&2
       tail -80 "${UVICORN_LOG}" >&2 || true
@@ -323,41 +416,56 @@ fi
 publish_offline_config
 
 if [[ "${TUNNEL_PROVIDER}" == "cloudflare" || "${TUNNEL_PROVIDER}" == "auto" ]]; then
+  if start_named_cloudflare_tunnel "${CLOUDFLARE_PUBLIC_URL}" "${CLOUDFLARE_TUNNEL_TOKEN}" "/api/health"; then
+    exit 0
+  fi
+
   for ((attempt=1; attempt<=MAX_TUNNEL_START_ATTEMPTS; attempt++)); do
+    acquire_global_tunnel_slot
     echo "Opening Cloudflare quick tunnel to http://127.0.0.1:${PORT} (attempt ${attempt}/${MAX_TUNNEL_START_ATTEMPTS})"
     : > "${TUNNEL_LOG}"
-    "${CLOUDFLARED}" tunnel --no-autoupdate --protocol http2 --url "http://127.0.0.1:${PORT}" >"${TUNNEL_LOG}" 2>&1 &
+    "${CLOUDFLARED}" tunnel --no-autoupdate --protocol "${CLOUDFLARE_PROTOCOL}" --url "http://127.0.0.1:${PORT}" >"${TUNNEL_LOG}" 2>&1 &
     TUNNEL_PID="$!"
 
     GALLERY_URL=""
-    for _ in {1..120}; do
+    for _ in $(seq 1 "${QUICK_TUNNEL_URL_ATTEMPTS}"); do
       if ! kill -0 "${TUNNEL_PID}" >/dev/null 2>&1; then
-        log_tunnel_failure_details
         break
       fi
       GALLERY_URL="$(grep -Eo 'https://[-a-zA-Z0-9.]+trycloudflare\.com' "${TUNNEL_LOG}" | tail -1 || true)"
-      if [[ -z "${GALLERY_URL}" ]]; then
-        sleep 1
-        continue
+      if [[ -n "${GALLERY_URL}" ]]; then
+        break
       fi
-      echo "Waiting for ${GALLERY_URL} to answer through Cloudflare..."
-      for ((ready_attempt=1; ready_attempt<=TUNNEL_READY_ATTEMPTS; ready_attempt++)); do
-        if curl -fsS --max-time 10 "${GALLERY_URL}/api/health" >/dev/null 2>&1; then
-          publish_live_url "${GALLERY_URL}"
-        fi
-        if ! kill -0 "${TUNNEL_PID}" >/dev/null 2>&1; then
-          log_tunnel_failure_details
-          break
-        fi
-        sleep 1
-      done
-      if [[ -n "${GALLERY_URL}" ]] && kill -0 "${TUNNEL_PID}" >/dev/null 2>&1; then
-        echo "Tunnel URL was created but never became reachable. Last log lines:" >&2
-        tail -80 "${TUNNEL_LOG}" >&2 || true
-        kill "${TUNNEL_PID}" >/dev/null 2>&1 || true
-      fi
-      break
+      sleep 1
     done
+
+    if [[ -z "${GALLERY_URL}" ]]; then
+      log_tunnel_failure_details
+      if tunnel_was_rate_limited; then
+        set_global_tunnel_cooldown "${GLOBAL_RATE_LIMIT_COOLDOWN_SECONDS}"
+      else
+        set_global_tunnel_cooldown "${GLOBAL_FAILURE_COOLDOWN_SECONDS}"
+      fi
+      release_global_tunnel_slot
+    else
+      set_global_tunnel_cooldown "${GLOBAL_SUCCESS_COOLDOWN_SECONDS}"
+      release_global_tunnel_slot
+      announce_live_url "${GALLERY_URL}"
+      wait_for_public_readiness "${GALLERY_URL}" "/api/health" || {
+        echo "Cloudflare quick tunnel died before it became reachable." >&2
+        tail -80 "${TUNNEL_LOG}" >&2 || true
+        publish_offline_config
+        if tunnel_was_rate_limited; then
+          set_global_tunnel_cooldown "${GLOBAL_RATE_LIMIT_COOLDOWN_SECONDS}"
+        else
+          set_global_tunnel_cooldown "${GLOBAL_FAILURE_COOLDOWN_SECONDS}"
+        fi
+        continue
+      }
+
+      wait "${TUNNEL_PID}"
+      exit $?
+    fi
 
     if (( attempt < MAX_TUNNEL_START_ATTEMPTS )); then
       retry_delay="$(tunnel_retry_delay "${attempt}")"
@@ -365,14 +473,9 @@ if [[ "${TUNNEL_PROVIDER}" == "cloudflare" || "${TUNNEL_PROVIDER}" == "auto" ]];
       sleep "${retry_delay}"
     fi
   done
-
-  echo "Exceeded Cloudflare quick tunnel startup retries." >&2
-  tail -80 "${TUNNEL_LOG}" >&2 || true
-fi
-
-if [[ "${TUNNEL_PROVIDER}" == "pinggy" || "${TUNNEL_PROVIDER}" == "auto" ]]; then
-  start_pinggy_tunnel
 fi
 
 publish_offline_config
+echo "Exceeded Cloudflare tunnel startup retries." >&2
+tail -80 "${TUNNEL_LOG}" >&2 || true
 exit 1
