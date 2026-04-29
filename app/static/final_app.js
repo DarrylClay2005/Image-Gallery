@@ -515,18 +515,60 @@ function renderAuth() {
   renderPageSidebar();
 }
 
+function isSiteOwner() {
+  return Boolean(currentUser?.site_owner);
+}
+
 function isDesmondUser() {
-  const username = String(currentUser?.username || "").trim().toLowerCase();
-  const displayName = String(currentUser?.display_name || "").trim().toLowerCase();
-  return username === "desmond" || displayName === "desmond";
+  return isSiteOwner();
 }
 
 function applyDesmondVisibility() {
-  const canSeePrivateData = isDesmondUser();
+  const canSeePrivateData = isSiteOwner();
   const status = safeEl("connection-status");
   const stats = document.querySelector(".stats-grid");
   if (status) status.hidden = false;
   if (stats) stats.hidden = !canSeePrivateData;
+}
+
+function categoryDisplayName(categoryName, subcategoryName = "") {
+  const main = String(categoryName || "").trim();
+  const sub = String(subcategoryName || "").trim();
+  if (!main) return sub || "Unsorted";
+  return sub ? `${main} / ${sub}` : main;
+}
+
+function categoryDisplayFromItem(item) {
+  return categoryDisplayName(item?.category_name, item?.subcategory_name);
+}
+
+function categoryById(id) {
+  return categories.find((item) => String(item.id) === String(id));
+}
+
+function isLegacyLeafCategory(category) {
+  const retired = new Set(["aria blaze (solo)", "dazzlings"]);
+  return retired.has(String(category?.name || "").trim().toLowerCase()) && Number(category?.media_count || 0) === 0;
+}
+
+function subcategoriesForCategory(categoryId) {
+  return categoryById(categoryId)?.subcategories || [];
+}
+
+function populateSubcategorySelect(selectId, categoryId, { includeCreate = false, selectedValue = "", emptyLabel = "No subcategory" } = {}) {
+  const select = safeEl(selectId);
+  if (!select) return;
+  const options = categoryId
+    ? subcategoriesForCategory(categoryId)
+    : categories.flatMap((category) => (category.subcategories || []).map((subcategory) => ({
+      ...subcategory,
+      _label: `${category.name} / ${subcategory.name}`,
+    })));
+  const selected = String(selectedValue || "");
+  select.innerHTML = `<option value="">${escapeHtml(emptyLabel)}</option>`
+    + options.map((subcategory) => `<option value="${subcategory.id}">${escapeHtml(subcategory._label || subcategory.name)}</option>`).join("")
+    + (includeCreate ? `<option value="__new__">Create new subcategory</option>` : "");
+  select.value = options.some((subcategory) => String(subcategory.id) === selected) ? selected : (selected === "__new__" ? "__new__" : "");
 }
 
 function openAgeDialog(message = "") {
@@ -960,11 +1002,35 @@ async function submitAgeVerification(event) {
 }
 
 function toggleNewCategory() {
-  const creating = !safeEl("upload-category")?.value;
+  const uploadCategory = safeEl("upload-category");
+  const creating = !uploadCategory?.value;
   showIfPresent("new-category-wrap", creating);
   showIfPresent("new-category-kind-wrap", creating);
+  showIfPresent("upload-subcategory-wrap", !creating);
+  populateSubcategorySelect("upload-subcategory", uploadCategory?.value, {
+    includeCreate: !creating,
+    selectedValue: safeEl("upload-subcategory")?.value || "",
+    emptyLabel: "No subcategory",
+  });
+  const creatingSubcategory = safeEl("upload-subcategory")?.value === "__new__";
+  showIfPresent("new-subcategory-wrap", creating || creatingSubcategory);
   const name = safeEl("new-category-name");
   if (name) name.required = creating;
+  const subcategoryName = safeEl("new-subcategory-name");
+  if (subcategoryName) subcategoryName.required = creatingSubcategory;
+}
+
+function toggleEditSubcategory() {
+  const categoryId = safeEl("edit-media-category")?.value || "";
+  const current = safeEl("edit-media-subcategory")?.value || "";
+  populateSubcategorySelect("edit-media-subcategory", categoryId, {
+    includeCreate: Boolean(categoryId),
+    selectedValue: current,
+    emptyLabel: "No subcategory",
+  });
+  showIfPresent("edit-new-subcategory-wrap", safeEl("edit-media-subcategory")?.value === "__new__");
+  const input = safeEl("edit-new-subcategory-name");
+  if (input) input.required = safeEl("edit-media-subcategory")?.value === "__new__";
 }
 
 function handleAdultOpen(id) {
@@ -1134,7 +1200,7 @@ async function initApiOrigin() {
 
 async function refreshAll() {
   await runLiveChecks({ silent: true }).catch(() => {});
-  await Promise.all([loadCategories(), isDesmondUser() ? loadStats() : Promise.resolve(), loadTags()]);
+  await Promise.all([loadCategories(), isSiteOwner() ? loadStats() : Promise.resolve(), loadTags()]);
   if (!galleryViewRestored) restoreGalleryViewState();
   if (currentPage === "collections") {
     await openCollectionsPage({ mine: collectionsMineMode, preserveSelection: true });
@@ -1162,7 +1228,7 @@ async function refreshAll() {
 async function loadTags() {
   const data = await apiFetch("/api/tags");
   const tags = data.tags || [];
-  const showCounts = isDesmondUser();
+  const showCounts = isSiteOwner();
   $("tag-cloud").innerHTML = tags.length ? tags.map((item) => (
     `<button type="button" data-tag="${escapeHtml(item.tag)}">${escapeHtml(item.tag)}${showCounts ? ` <span>${item.count}</span>` : ""}</button>`
   )).join("") : `<span class="muted">${latestLiveSnapshot?.media_active ? "No public tags on loaded posts" : "Checking tags"}</span>`;
@@ -1170,18 +1236,25 @@ async function loadTags() {
 
 async function loadCategories() {
   const data = await apiFetch("/api/categories");
-  categories = data.categories || [];
+  categories = (data.categories || []).filter((category) => !isLegacyLeafCategory(category));
   const filter = $("category-filter");
+  const subFilter = safeEl("subcategory-filter");
   const upload = $("upload-category");
+  const uploadSubcategory = safeEl("upload-subcategory");
   const edit = safeEl("edit-media-category");
+  const editSubcategory = safeEl("edit-media-subcategory");
   const selectedFilter = filter.value;
+  const selectedSubFilter = subFilter?.value || "";
   const selectedUpload = upload.value;
+  const selectedUploadSubcategory = uploadSubcategory?.value || "";
   const selectedEdit = edit?.value || "";
+  const selectedEditSubcategory = editSubcategory?.value || "";
   filter.innerHTML = `<option value="">All categories</option>`;
+  if (subFilter) subFilter.innerHTML = `<option value="">All subcategories</option>`;
   upload.innerHTML = `<option value="">Create new category</option>`;
   if (edit) edit.innerHTML = "";
   for (const category of categories) {
-    const count = isDesmondUser() ? ` (${category.media_count || 0})` : "";
+    const count = isSiteOwner() ? ` (${category.media_count || 0})` : "";
     filter.insertAdjacentHTML("beforeend", `<option value="${category.id}">${escapeHtml(category.name)}${count}</option>`);
     upload.insertAdjacentHTML("beforeend", `<option value="${category.id}">${escapeHtml(category.name)}</option>`);
     if (edit) edit.insertAdjacentHTML("beforeend", `<option value="${category.id}">${escapeHtml(category.name)}</option>`);
@@ -1189,7 +1262,23 @@ async function loadCategories() {
   filter.value = selectedFilter;
   upload.value = selectedUpload || (categories[0]?.id ?? "");
   if (edit) edit.value = selectedEdit || (categories[0]?.id ?? "");
+  populateSubcategorySelect("subcategory-filter", filter.value, {
+    includeCreate: false,
+    selectedValue: selectedSubFilter,
+    emptyLabel: filter.value ? "All subcategories" : "All subcategories",
+  });
+  populateSubcategorySelect("upload-subcategory", upload.value, {
+    includeCreate: Boolean(upload.value),
+    selectedValue: selectedUploadSubcategory,
+    emptyLabel: "No subcategory",
+  });
+  populateSubcategorySelect("edit-media-subcategory", edit?.value || "", {
+    includeCreate: Boolean(edit?.value),
+    selectedValue: selectedEditSubcategory,
+    emptyLabel: "No subcategory",
+  });
   toggleNewCategory();
+  toggleEditSubcategory();
 }
 
 async function loadStats() {
@@ -1206,6 +1295,7 @@ function galleryFiltersActive() {
     safeEl("search")?.value?.trim()
     || safeEl("kind-filter")?.value
     || safeEl("category-filter")?.value
+    || safeEl("subcategory-filter")?.value
     || safeEl("uploader-filter")?.value?.trim()
     || safeEl("min-size-filter")?.value
     || safeEl("max-size-filter")?.value
@@ -1220,6 +1310,7 @@ function galleryViewState() {
     search: safeEl("search")?.value?.trim() || "",
     kind: safeEl("kind-filter")?.value || "",
     category: safeEl("category-filter")?.value || "",
+    subcategory: safeEl("subcategory-filter")?.value || "",
     uploader: safeEl("uploader-filter")?.value?.trim() || "",
     minSize: safeEl("min-size-filter")?.value || "",
     maxSize: safeEl("max-size-filter")?.value || "",
@@ -1244,6 +1335,7 @@ function restoreGalleryViewState() {
     search: params.get("q") ?? stored.search,
     kind: params.get("kind") ?? stored.kind,
     category: params.get("category") ?? stored.category,
+    subcategory: params.get("subcategory") ?? stored.subcategory,
     uploader: params.get("uploader") ?? stored.uploader,
     minSize: params.get("minSize") ?? stored.minSize,
     maxSize: params.get("maxSize") ?? stored.maxSize,
@@ -1256,6 +1348,7 @@ function restoreGalleryViewState() {
   if (safeEl("search")) $("search").value = state.search || "";
   if (safeEl("kind-filter")) $("kind-filter").value = state.kind || "";
   if (safeEl("category-filter")) $("category-filter").value = state.category || "";
+  if (safeEl("subcategory-filter")) $("subcategory-filter").value = state.subcategory || "";
   if (safeEl("uploader-filter")) $("uploader-filter").value = state.uploader || "";
   if (safeEl("min-size-filter")) $("min-size-filter").value = state.minSize || "";
   if (safeEl("max-size-filter")) $("max-size-filter").value = state.maxSize || "";
@@ -1270,6 +1363,7 @@ function clearGalleryFilters() {
   if (safeEl("search")) $("search").value = "";
   if (safeEl("kind-filter")) $("kind-filter").value = "";
   if (safeEl("category-filter")) $("category-filter").value = "";
+  if (safeEl("subcategory-filter")) $("subcategory-filter").value = "";
   if (safeEl("uploader-filter")) $("uploader-filter").value = "";
   if (safeEl("min-size-filter")) $("min-size-filter").value = "";
   if (safeEl("max-size-filter")) $("max-size-filter").value = "";
@@ -1287,10 +1381,16 @@ function renderActiveFilters() {
   if (!wrap) return;
   const state = galleryViewState();
   const category = categories.find((item) => String(item.id) === String(state.category));
+  const subcategory = state.subcategory
+    ? (state.category
+      ? subcategoriesForCategory(state.category).find((item) => String(item.id) === String(state.subcategory))
+      : categories.flatMap((item) => item.subcategories || []).find((item) => String(item.id) === String(state.subcategory)))
+    : null;
   const chips = [];
   if (state.search) chips.push(["search", `Search: ${state.search}`]);
   if (state.kind) chips.push(["kind", `Type: ${state.kind === "image" ? "Images/GIFs" : "Videos"}`]);
   if (state.category) chips.push(["category", `Category: ${category?.name || state.category}`]);
+  if (state.subcategory) chips.push(["subcategory", `Subcategory: ${subcategory?.name || state.subcategory}`]);
   if (state.uploader) chips.push(["uploader", `Uploader: ${state.uploader}`]);
   if (state.minSize) chips.push(["minSize", `Min: ${state.minSize} MB`]);
   if (state.maxSize) chips.push(["maxSize", `Max: ${state.maxSize} MB`]);
@@ -1309,6 +1409,7 @@ async function shareCurrentView() {
   if (state.search) params.set("q", state.search);
   if (state.kind) params.set("kind", state.kind);
   if (state.category) params.set("category", state.category);
+  if (state.subcategory) params.set("subcategory", state.subcategory);
   if (state.uploader) params.set("uploader", state.uploader);
   if (state.minSize) params.set("minSize", state.minSize);
   if (state.maxSize) params.set("maxSize", state.maxSize);
@@ -1324,9 +1425,13 @@ async function shareCurrentView() {
 function describeGalleryState(state) {
   const pieces = [];
   const category = categories.find((item) => String(item.id) === String(state.category));
+  const subcategory = state.subcategory
+    ? categories.flatMap((item) => item.subcategories || []).find((item) => String(item.id) === String(state.subcategory))
+    : null;
   if (state.search) pieces.push(`"${state.search}"`);
   if (state.kind) pieces.push(state.kind === "image" ? "images" : "videos");
   if (state.category) pieces.push(category?.name || `category ${state.category}`);
+  if (state.subcategory) pieces.push(subcategory?.name || `subcategory ${state.subcategory}`);
   if (state.uploader) pieces.push(`by ${state.uploader}`);
   if (state.minSize || state.maxSize) pieces.push(`${state.minSize || 0}-${state.maxSize || "any"} MB`);
   if (state.dateFrom || state.dateTo) pieces.push(`${state.dateFrom || "any"} to ${state.dateTo || "now"}`);
@@ -1371,6 +1476,11 @@ function applyGalleryState(state = {}) {
   if (safeEl("search")) $("search").value = state.search || "";
   if (safeEl("kind-filter")) $("kind-filter").value = state.kind || "";
   if (safeEl("category-filter")) $("category-filter").value = state.category || "";
+  populateSubcategorySelect("subcategory-filter", state.category || "", {
+    includeCreate: false,
+    selectedValue: state.subcategory || "",
+    emptyLabel: "All subcategories",
+  });
   if (safeEl("uploader-filter")) $("uploader-filter").value = state.uploader || "";
   if (safeEl("min-size-filter")) $("min-size-filter").value = state.minSize || "";
   if (safeEl("max-size-filter")) $("max-size-filter").value = state.maxSize || "";
@@ -1409,6 +1519,7 @@ async function shareSavedView(id) {
   if (state.search) params.set("q", state.search);
   if (state.kind) params.set("kind", state.kind);
   if (state.category) params.set("category", state.category);
+  if (state.subcategory) params.set("subcategory", state.subcategory);
   if (state.uploader) params.set("uploader", state.uploader);
   if (state.minSize) params.set("minSize", state.minSize);
   if (state.maxSize) params.set("maxSize", state.maxSize);
@@ -1474,6 +1585,7 @@ async function loadMedia(page = galleryPage, { scrollToTop = false } = {}) {
   const params = new URLSearchParams();
   if ($("kind-filter").value) params.set("media_kind", $("kind-filter").value);
   if ($("category-filter").value) params.set("category_id", $("category-filter").value);
+  if (safeEl("subcategory-filter")?.value) params.set("subcategory_id", $("subcategory-filter").value);
   if ($("search").value.trim()) params.set("q", $("search").value.trim());
   if (safeEl("uploader-filter")?.value.trim()) params.set("uploader", $("uploader-filter").value.trim());
   if (mbToBytes(safeEl("min-size-filter")?.value)) params.set("min_size", String(mbToBytes($("min-size-filter").value)));
@@ -1507,10 +1619,12 @@ function focusGalleryOnNewestUploads() {
   const search = safeEl("search");
   const kind = safeEl("kind-filter");
   const category = safeEl("category-filter");
+  const subcategory = safeEl("subcategory-filter");
   const sort = safeEl("sort-filter");
   if (search) search.value = "";
   if (kind) kind.value = "";
   if (category) category.value = "";
+  if (subcategory) subcategory.value = "";
   if (sort) sort.value = "new";
   galleryPage = 1;
   saveGalleryViewState();
@@ -1612,7 +1726,7 @@ function renderCompareBoard() {
       <h3>${adultBadge(item)}${escapeHtml(item.title)}</h3>
       <dl>
         <div><dt>Creator</dt><dd>${escapeHtml(item.display_name || item.username || "Unknown")}</dd></div>
-        <div><dt>Category</dt><dd>${escapeHtml(item.category_name || "Unsorted")}</dd></div>
+        <div><dt>Category</dt><dd>${escapeHtml(categoryDisplayFromItem(item))}</dd></div>
         <div><dt>Type</dt><dd>${escapeHtml(item.media_kind || "media")}</dd></div>
         <div><dt>Size</dt><dd>${formatBytes(item.file_size)}</dd></div>
         <div><dt>Likes</dt><dd>${Number(item.like_count || 0)}</dd></div>
@@ -1692,7 +1806,7 @@ function openInsights() {
       </article>
       <article>
         <h3>Top Categories</h3>
-        ${renderInsightBars(topCounts(items, (item) => item.category_name))}
+        ${renderInsightBars(topCounts(items, (item) => categoryDisplayFromItem(item)))}
       </article>
       <article>
         <h3>Top Creators</h3>
@@ -1741,7 +1855,7 @@ function renderSlideshowSlide() {
     ? `<video src="${item.url}" controls autoplay playsinline ${userSettings().muted_previews ? "muted" : ""}></video>`
     : `<img src="${item.url}" alt="${escapeHtml(item.title)}" />`;
   setTextIfPresent("slideshow-title", item.title || "Slideshow");
-  setTextIfPresent("slideshow-meta", `${slideshowIndex + 1} of ${items.length} · ${item.category_name || "Media"} · ${formatBytes(item.file_size)}`);
+  setTextIfPresent("slideshow-meta", `${slideshowIndex + 1} of ${items.length} · ${categoryDisplayFromItem(item)} · ${formatBytes(item.file_size)}`);
 }
 
 function moveSlideshow(direction) {
@@ -1812,15 +1926,18 @@ function renderMediaGrid() {
     const card = document.createElement("article");
     const selectedForCompare = compareSelection.has(Number(item.id));
     card.className = `media-card${item.is_adult ? " adult-card" : ""}${selectedForCompare ? " is-compared" : ""}`;
-    const prefs = userSettings();
     card.innerHTML = `
       <button class="media-preview" type="button" data-open="${item.id}">${renderPreview(item)}</button>
       <div class="media-info">
-        <div class="author-row">
+        <div class="media-kicker-row">
+          <span class="media-kicker">${escapeHtml(categoryDisplayFromItem(item))}</span>
+          <span class="media-kicker subtle">${escapeHtml(item.media_kind === "video" ? "Video" : "Image")}</span>
+        </div>
+        <div class="author-row media-card-head">
           <button type="button" class="avatar tiny" style="border-color:${escapeHtml(item.profile_color || "#37c9a7")}" data-profile="${escapeHtml(item.username || "")}">${item.user_avatar_url ? `<img src="${item.user_avatar_url}" alt="">` : escapeHtml((item.display_name || item.username || "IG").slice(0, 2).toUpperCase())}</button>
-          <div>
-          <h2>${adultBadge(item)}${escapeHtml(item.title)}</h2>
-          <p class="muted">${escapeHtml(item.category_name)} by <button type="button" class="text-button" data-profile="${escapeHtml(item.username || "")}">${escapeHtml(item.display_name || item.username)}</button>${item.visibility && item.visibility !== "public" ? ` · ${escapeHtml(item.visibility)}` : ""}${item.pinned_at ? " · pinned" : ""}</p>
+          <div class="media-copy">
+            <h2>${adultBadge(item)}${escapeHtml(item.title)}</h2>
+            <p class="muted">by <button type="button" class="text-button" data-profile="${escapeHtml(item.username || "")}">${escapeHtml(item.display_name || item.username)}</button>${item.visibility && item.visibility !== "public" ? ` · ${escapeHtml(item.visibility)}` : ""}${item.pinned_at ? " · pinned" : ""}</p>
           </div>
         </div>
         <div class="metric-row">
@@ -1828,6 +1945,7 @@ function renderMediaGrid() {
           <span>${item.downloads || 0} downloads</span>
           <span>${formatBytes(item.file_size)}</span>
         </div>
+        <div class="tag-row compact">${(item.tags || []).slice(0, 4).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("") || `<span>untagged</span>`}</div>
         <div class="card-actions">
           <button type="button" data-compare="${item.id}" aria-pressed="${selectedForCompare ? "true" : "false"}">${selectedForCompare ? "Selected" : "Compare"}</button>
           <button type="button" data-like="${item.id}">${item.liked_by_me ? "Unlike" : "Like"}</button>
@@ -1869,7 +1987,7 @@ async function openDetail(id) {
     ? `<video src="${item.url}" controls autoplay playsinline></video>`
     : `<img src="${item.url}" alt="${escapeHtml(item.title)}" />`;
   resetDetailTransform();
-  $("detail-meta").textContent = `${item.category_name} by ${item.display_name || item.username} - ${formatBytes(item.file_size)} - ${item.like_count || 0} likes`;
+  $("detail-meta").textContent = `${categoryDisplayFromItem(item)} by ${item.display_name || item.username} - ${formatBytes(item.file_size)} - ${item.like_count || 0} likes`;
   renderDetailInspector(item);
   $("detail-description").innerHTML = `
     ${item.user_avatar_url ? `<div class="profile-mini"><button type="button" class="avatar" data-profile="${escapeHtml(item.username || "")}"><img src="${item.user_avatar_url}" alt=""></button><div><button type="button" class="text-button strong" data-profile="${escapeHtml(item.username || "")}">${escapeHtml(item.display_name || item.username)}</button>${item.user_bio ? `<p>${escapeHtml(item.user_bio)}</p>` : ""}${item.user_website_url ? `<a href="${item.user_website_url}" target="_blank" rel="noopener">Website</a>` : ""}</div></div>` : ""}
@@ -1963,10 +2081,10 @@ async function toggleLike(id, liked = null) {
   renderMediaGrid();
   if (activeDetail && Number(activeDetail.id) === Number(id)) {
     $("detail-like").textContent = updated.liked_by_me ? "Unlike" : "Like";
-    $("detail-meta").textContent = `${updated.category_name} by ${updated.display_name || updated.username} - ${formatBytes(updated.file_size)} - ${updated.like_count || 0} likes`;
+    $("detail-meta").textContent = `${categoryDisplayFromItem(updated)} by ${updated.display_name || updated.username} - ${formatBytes(updated.file_size)} - ${updated.like_count || 0} likes`;
   }
   showToast(updated.liked_by_me ? "Liked." : "Like removed.", "success");
-  if (isDesmondUser()) await loadStats().catch(() => {});
+  if (isSiteOwner()) await loadStats().catch(() => {});
 }
 
 async function openSurprise() {
@@ -2161,11 +2279,18 @@ async function editOwnMedia(id) {
   $("edit-media-description").value = item.description || "";
   $("edit-media-tags").value = (item.tags || []).join(", ");
   $("edit-media-category").value = item.category_id || categories[0]?.id || "";
+  populateSubcategorySelect("edit-media-subcategory", $("edit-media-category").value, {
+    includeCreate: true,
+    selectedValue: item.subcategory_id || "",
+    emptyLabel: "No subcategory",
+  });
   $("edit-media-visibility").value = item.visibility || "public";
   $("edit-media-comments-enabled").checked = item.comments_enabled !== false;
   $("edit-media-downloads-enabled").checked = item.downloads_enabled !== false;
   $("edit-media-pinned").checked = Boolean(item.pinned_at);
   $("edit-media-adult").checked = Boolean(item.is_adult);
+  if (safeEl("edit-new-subcategory-name")) $("edit-new-subcategory-name").value = "";
+  toggleEditSubcategory();
   $("edit-media-dialog").showModal();
 }
 
@@ -2184,6 +2309,8 @@ async function submitEditMedia(event) {
         title,
         description: $("edit-media-description").value.trim() || null,
         category_id: categoryId,
+        subcategory_id: $("edit-media-subcategory").value && $("edit-media-subcategory").value !== "__new__" ? Number($("edit-media-subcategory").value) : null,
+        subcategory_name: $("edit-media-subcategory").value === "__new__" ? $("edit-new-subcategory-name").value.trim() || null : null,
         tags: $("edit-media-tags").value.split(",").map((tag) => tag.trim()).filter(Boolean),
         is_adult: $("edit-media-adult").checked,
         visibility: $("edit-media-visibility").value,
@@ -2748,9 +2875,12 @@ async function submitUpload(event) {
     if ($("upload-pinned")) body.set("pinned", index === 0 && $("upload-pinned").checked ? "true" : "false");
     if ($("upload-category").value) {
       body.set("category_id", $("upload-category").value);
+      if (safeEl("upload-subcategory")?.value && $("upload-subcategory").value !== "__new__") body.set("subcategory_id", $("upload-subcategory").value);
+      if (safeEl("upload-subcategory")?.value === "__new__" && safeEl("new-subcategory-name")?.value.trim()) body.set("subcategory_name", $("new-subcategory-name").value.trim());
     } else {
       body.set("category_name", $("new-category-name").value);
       body.set("category_kind", $("new-category-kind").value);
+      if (safeEl("new-subcategory-name")?.value.trim()) body.set("subcategory_name", $("new-subcategory-name").value.trim());
     }
     return body;
   };
@@ -2863,7 +2993,7 @@ function renderLiveChecks(data, silent = false) {
   const missing = Number(data?.snapshot?.missing_db_files || 0);
   if (!silent && checks.length) {
     let message = checks.map((check) => `${check.ok ? "✓" : check.severity === "warn" ? "!" : "✕"} ${check.label}: ${check.detail}`).join("\n");
-    if (missing > 0 && isDesmondUser()) message += `\n\n${missing} legacy file(s) still need migration. Use OK on the next prompt to migrate up to 10 safely.`;
+    if (missing > 0 && isSiteOwner()) message += `\n\n${missing} legacy file(s) still need migration. Use OK on the next prompt to migrate up to 10 safely.`;
     alert(message);
   }
   return { missing };
@@ -2877,7 +3007,7 @@ async function runLiveChecks({ silent = false } = {}) {
   try {
     const data = await apiFetch("/api/live/checks");
     const rendered = renderLiveChecks(data, silent);
-    if (!silent && rendered.missing > 0 && isDesmondUser() && confirm("Run a safe DB file migration batch now? This migrates up to 10 legacy disk files to DB blobs and may take a moment.")) {
+    if (!silent && rendered.missing > 0 && isSiteOwner() && confirm("Run a safe DB file migration batch now? This migrates up to 10 legacy disk files to DB blobs and may take a moment.")) {
       const migrated = await apiFetch("/api/live/migrate", { method: "POST" });
       alert(`Migration batch complete. Migrated: ${migrated.migrated?.migrated || 0}. Missing after batch: ${migrated.snapshot?.missing_db_files || 0}.`);
       return runLiveChecks({ silent: true });
@@ -3142,6 +3272,9 @@ function bindEvents() {
   on("edit-media-close", "click", () => $("edit-media-dialog").close());
   on("edit-media-form", "submit", submitEditMedia);
   $("upload-category").addEventListener("change", toggleNewCategory);
+  on("upload-subcategory", "change", toggleNewCategory);
+  on("edit-media-category", "change", toggleEditSubcategory);
+  on("edit-media-subcategory", "change", toggleEditSubcategory);
   $("upload-file").addEventListener("change", updateUploadFileSummary);
   const dropZone = document.querySelector(".drop-zone");
   if (dropZone) {
@@ -3175,6 +3308,7 @@ function bindEvents() {
     if (key === "search") $("search").value = "";
     if (key === "kind") $("kind-filter").value = "";
     if (key === "category") $("category-filter").value = "";
+    if (key === "subcategory") $("subcategory-filter").value = "";
     if (key === "uploader") $("uploader-filter").value = "";
     if (key === "minSize") $("min-size-filter").value = "";
     if (key === "maxSize") $("max-size-filter").value = "";
@@ -3184,7 +3318,16 @@ function bindEvents() {
     if (key === "sort") $("sort-filter").value = "new";
     loadMedia(1);
   });
-  ["kind-filter", "category-filter", "sort-filter", "adult-filter", "date-from-filter", "date-to-filter"].forEach((id) => $(id).addEventListener("input", () => loadMedia(1)));
+  ["kind-filter", "sort-filter", "adult-filter", "date-from-filter", "date-to-filter"].forEach((id) => $(id).addEventListener("input", () => loadMedia(1)));
+  on("category-filter", "input", () => {
+    populateSubcategorySelect("subcategory-filter", $("category-filter").value, {
+      includeCreate: false,
+      selectedValue: "",
+      emptyLabel: "All subcategories",
+    });
+    loadMedia(1);
+  });
+  on("subcategory-filter", "input", () => loadMedia(1));
   ["uploader-filter", "min-size-filter", "max-size-filter"].forEach((id) => $(id).addEventListener("input", () => {
     clearTimeout(window.__advancedFilterTimer);
     renderActiveFilters();

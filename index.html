@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#101318" />
   <title>Image Gallery</title>
-  <link rel="stylesheet" href="./app/static/styles.css?v=20260428-large-upload-motion" />
+  <link rel="stylesheet" href="./app/static/styles.css?v=20260429-subcategory-refresh" />
 </head>
 <body>
   <header class="topbar">
@@ -51,6 +51,12 @@
           <span>Category</span>
           <select id="category-filter">
             <option value="">All categories</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Subcategory</span>
+          <select id="subcategory-filter">
+            <option value="">All subcategories</option>
           </select>
         </label>
         <label class="field">
@@ -125,11 +131,15 @@
 
     <section class="content">
       <section id="discover-page" class="app-page">
-        <div class="content-head">
+        <div class="content-head discover-hero-shell">
           <div>
             <p id="page-eyebrow" class="page-eyebrow">Discover</p>
             <h1 id="page-title">Fresh Drops</h1>
             <p id="result-count" class="muted">Loading gallery</p>
+          </div>
+          <div class="discover-hero-note">
+            <strong>Layer categories with subcategories.</strong>
+            <p class="muted">Browse by franchise, character, or collection lane, then jump into a richer card-first gallery.</p>
           </div>
           <div class="content-actions">
             <button id="slideshow-open" type="button">Slideshow</button>
@@ -621,6 +631,10 @@
           <span>Category</span>
           <select id="upload-category" name="category_id"></select>
         </label>
+        <label id="upload-subcategory-wrap" class="field">
+          <span>Subcategory</span>
+          <select id="upload-subcategory" name="subcategory_id"></select>
+        </label>
         <label id="new-category-wrap" class="field" hidden>
           <span>New category</span>
           <input id="new-category-name" name="category_name" maxlength="80" />
@@ -632,6 +646,10 @@
             <option value="image">Image</option>
             <option value="video">Video</option>
           </select>
+        </label>
+        <label id="new-subcategory-wrap" class="field" hidden>
+          <span>New subcategory</span>
+          <input id="new-subcategory-name" name="subcategory_name" maxlength="80" />
         </label>
       </div>
       <label class="field">
@@ -731,6 +749,14 @@
           <span>Category</span>
           <select id="edit-media-category" required></select>
         </label>
+        <label class="field">
+          <span>Subcategory</span>
+          <select id="edit-media-subcategory"></select>
+        </label>
+        <label id="edit-new-subcategory-wrap" class="field" hidden>
+          <span>New subcategory</span>
+          <input id="edit-new-subcategory-name" maxlength="80" />
+        </label>
       </div>
       <label class="field">
         <span>Description</span>
@@ -815,6 +841,6 @@
     <button id="compare-clear" type="button">Clear</button>
   </div>
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true" hidden></div>
-  <script src="./app/static/final_app.js?v=20260428-large-upload-motion"></script>
+  <script src="./app/static/final_app.js?v=20260429-subcategory-refresh"></script>
 </body>
 </html>

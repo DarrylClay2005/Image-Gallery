@@ -68,6 +68,7 @@ USER_COLUMNS = (
 )
 MEDIA_COLUMNS = (
     ("media_file_id", "BIGINT UNSIGNED NULL"),
+    ("subcategory_id", "BIGINT UNSIGNED NULL"),
     ("visibility", "ENUM('public','unlisted','private') NOT NULL DEFAULT 'public'"),
     ("comments_enabled", "TINYINT(1) NOT NULL DEFAULT 1"),
     ("downloads_enabled", "TINYINT(1) NOT NULL DEFAULT 1"),
@@ -81,6 +82,14 @@ MEDIA_COLUMNS = (
     ("moderation_score", "FLOAT NOT NULL DEFAULT 0"),
     ("moderation_reason", "VARCHAR(300) NULL"),
     ("moderated_at", "TIMESTAMP NULL DEFAULT NULL"),
+)
+MEDIA_CATEGORY_SELECT = (
+    "c.name AS category_name, c.slug AS category_slug, "
+    "sc.id AS subcategory_id, sc.name AS subcategory_name, sc.slug AS subcategory_slug,"
+)
+MEDIA_CATEGORY_JOIN = (
+    "JOIN categories c ON c.id = m.category_id "
+    "LEFT JOIN subcategories sc ON sc.id = m.subcategory_id"
 )
 
 
@@ -426,6 +435,7 @@ class GalleryDatabase:
                     """
                 )
         await self.ensure_user_columns()
+        await self.ensure_subcategory_tables()
         await self.ensure_media_columns()
         await self.seed_default_categories()
 
@@ -449,6 +459,27 @@ class GalleryDatabase:
                 except Exception:
                     pass
 
+    async def ensure_subcategory_tables(self) -> None:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS subcategories (
+                      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                      category_id BIGINT UNSIGNED NOT NULL,
+                      name VARCHAR(80) NOT NULL,
+                      slug VARCHAR(90) NOT NULL,
+                      created_by BIGINT UNSIGNED NULL,
+                      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      UNIQUE KEY uniq_subcategories_name (category_id, name),
+                      UNIQUE KEY uniq_subcategories_slug (category_id, slug),
+                      KEY idx_subcategories_category (category_id, created_at),
+                      CONSTRAINT fk_subcategories_category FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE,
+                      CONSTRAINT fk_subcategories_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                    """
+                )
+
     async def ensure_media_columns(self) -> None:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
@@ -465,6 +496,28 @@ class GalleryDatabase:
                         await cur.execute(f"ALTER TABLE media_items ADD COLUMN {name} {definition}")
                 if "is_adult" not in existing:
                     await cur.execute("CREATE INDEX idx_media_adult ON media_items (is_adult, created_at)")
+                try:
+                    await cur.execute("CREATE INDEX idx_media_subcategory ON media_items (subcategory_id)")
+                except Exception:
+                    pass
+                await cur.execute(
+                    """
+                    SELECT CONSTRAINT_NAME
+                    FROM information_schema.KEY_COLUMN_USAGE
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='media_items' AND COLUMN_NAME='subcategory_id'
+                      AND REFERENCED_TABLE_NAME='subcategories'
+                    LIMIT 1
+                    """,
+                    (self.settings.db_schema,),
+                )
+                if not await cur.fetchone():
+                    await cur.execute(
+                        """
+                        ALTER TABLE media_items
+                        ADD CONSTRAINT fk_media_subcategory
+                        FOREIGN KEY (subcategory_id) REFERENCES subcategories(id) ON DELETE SET NULL
+                        """
+                    )
 
     async def seed_default_categories(self) -> None:
         defaults = [
@@ -753,6 +806,62 @@ class GalleryDatabase:
                 await cur.execute("SELECT * FROM categories WHERE id=%s", (cur.lastrowid,))
                 return await cur.fetchone()
 
+    async def create_subcategory(self, category_id: int, name: str, user_id: int | None) -> dict[str, Any]:
+        name = " ".join(str(name or "").strip().split())[:80]
+        if not name:
+            raise ValueError("Subcategory name is required.")
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT id FROM categories WHERE id=%s", (category_id,))
+                if not await cur.fetchone():
+                    raise ValueError("Choose a valid category before creating a subcategory.")
+                slug = slugify(name)
+                await cur.execute(
+                    "SELECT * FROM subcategories WHERE category_id=%s AND (name=%s OR slug=%s) LIMIT 1",
+                    (category_id, name, slug),
+                )
+                existing = await cur.fetchone()
+                if existing:
+                    return existing
+                await cur.execute(
+                    """
+                    INSERT INTO subcategories (category_id, name, slug, created_by)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (category_id, name, slug, user_id),
+                )
+                await cur.execute("SELECT * FROM subcategories WHERE id=%s", (cur.lastrowid,))
+                return await cur.fetchone()
+
+    async def resolve_category_ids(
+        self,
+        *,
+        category_id: int,
+        subcategory_id: int | None = None,
+        subcategory_name: str | None = None,
+        user_id: int | None = None,
+    ) -> tuple[int, int | None]:
+        normalized_category_id = int(category_id or 0)
+        if normalized_category_id <= 0:
+            raise ValueError("Choose a valid category.")
+        normalized_subcategory_id = int(subcategory_id or 0) or None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute("SELECT id FROM categories WHERE id=%s", (normalized_category_id,))
+                if not await cur.fetchone():
+                    raise ValueError("Category does not exist.")
+                if normalized_subcategory_id:
+                    await cur.execute(
+                        "SELECT id FROM subcategories WHERE id=%s AND category_id=%s",
+                        (normalized_subcategory_id, normalized_category_id),
+                    )
+                    if not await cur.fetchone():
+                        raise ValueError("Subcategory does not belong to that category.")
+        if not normalized_subcategory_id and str(subcategory_name or "").strip():
+            subcategory = await self.create_subcategory(normalized_category_id, str(subcategory_name), user_id)
+            normalized_subcategory_id = int(subcategory["id"])
+        return normalized_category_id, normalized_subcategory_id
+
     async def list_categories(self) -> list[dict[str, Any]]:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
@@ -765,7 +874,23 @@ class GalleryDatabase:
                     ORDER BY c.name
                     """
                 )
-                return list(await cur.fetchall())
+                categories = list(await cur.fetchall())
+                await cur.execute(
+                    """
+                    SELECT s.*, COUNT(m.id) AS media_count
+                    FROM subcategories s
+                    LEFT JOIN media_items m ON m.subcategory_id = s.id AND m.deleted_at IS NULL
+                    GROUP BY s.id
+                    ORDER BY s.name
+                    """
+                )
+                subcategories = list(await cur.fetchall())
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for row in subcategories:
+            grouped.setdefault(int(row["category_id"]), []).append(row)
+        for row in categories:
+            row["subcategories"] = grouped.get(int(row["id"]), [])
+        return categories
 
     async def save_media_file(self, *, user_id: int, content: bytes, sha256: str, mime_type: str, original_filename: str, media_kind: str, file_size: int | None = None) -> dict[str, Any]:
         # Large BLOB writes are serialized and chunked so uploads do not depend on
@@ -870,14 +995,14 @@ class GalleryDatabase:
                 await cur.execute(
                     """
                     INSERT INTO media_items
-                      (user_id, category_id, title, description, tags, media_kind, mime_type, original_filename,
+                      (user_id, category_id, subcategory_id, title, description, tags, media_kind, mime_type, original_filename,
                        storage_path, file_size, media_file_id, content_sha256, visibility, comments_enabled, downloads_enabled, pinned_at,
                        is_adult, adult_marked_by_user, adult_marked_by_ai,
                        moderation_status, moderation_score, moderation_reason, moderated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CASE WHEN %s=1 THEN CURRENT_TIMESTAMP ELSE NULL END, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CASE WHEN %s=1 THEN CURRENT_TIMESTAMP ELSE NULL END, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                     """,
                     (
-                        item["user_id"], item["category_id"], item["title"], item.get("description"), tags_json,
+                        item["user_id"], item["category_id"], item.get("subcategory_id"), item["title"], item.get("description"), tags_json,
                         item["media_kind"], item["mime_type"], item["original_filename"],
                         item.get("storage_path") or f"db://media/{item.get('media_file_id')}", item["file_size"],
                         item.get("media_file_id"), item.get("content_sha256"),
@@ -901,6 +1026,7 @@ class GalleryDatabase:
         viewer_id: int | None,
         media_kind: str | None = None,
         category_id: int | None = None,
+        subcategory_id: int | None = None,
         query: str | None = None,
         uploader: str | None = None,
         min_size: int | None = None,
@@ -921,6 +1047,9 @@ class GalleryDatabase:
         if category_id:
             clauses.append("m.category_id=%s")
             params.append(category_id)
+        if subcategory_id:
+            clauses.append("m.subcategory_id=%s")
+            params.append(subcategory_id)
         if query:
             clauses.append("(m.title LIKE %s OR m.description LIKE %s OR m.tags LIKE %s)")
             needle = f"%{query}%"
@@ -957,7 +1086,7 @@ class GalleryDatabase:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
                     f"""
-                    SELECT m.*, c.name AS category_name, c.slug AS category_slug,
+                    SELECT m.*, {MEDIA_CATEGORY_SELECT}
                            u.username,
                            CASE WHEN u.public_profile=1 OR u.id=%s THEN u.display_name ELSE u.username END AS display_name,
                            CASE WHEN u.public_profile=1 OR u.id=%s THEN u.bio ELSE NULL END AS user_bio,
@@ -969,7 +1098,7 @@ class GalleryDatabase:
                            MAX(CASE WHEN b.user_id IS NULL THEN 0 ELSE 1 END) AS bookmarked_by_me,
                            MAX(CASE WHEN l2.user_id IS NULL THEN 0 ELSE 1 END) AS liked_by_me
                     FROM media_items m
-                    JOIN categories c ON c.id = m.category_id
+                    {MEDIA_CATEGORY_JOIN}
                     JOIN users u ON u.id = m.user_id
                     LEFT JOIN media_likes l ON l.media_id = m.id
                     LEFT JOIN media_likes l2 ON l2.media_id = m.id AND l2.user_id = %s
@@ -988,8 +1117,8 @@ class GalleryDatabase:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
-                    """
-                    SELECT m.*, c.name AS category_name, c.slug AS category_slug,
+                    f"""
+                    SELECT m.*, {MEDIA_CATEGORY_SELECT}
                            u.username, u.display_name, u.bio AS user_bio, u.website_url AS user_website_url,
                            u.avatar_path AS user_avatar_path, u.profile_color, u.public_profile,
                            COUNT(DISTINCT l.user_id) AS like_count,
@@ -997,7 +1126,7 @@ class GalleryDatabase:
                            MAX(CASE WHEN b.user_id IS NULL THEN 0 ELSE 1 END) AS bookmarked_by_me,
                            MAX(CASE WHEN l2.user_id IS NULL THEN 0 ELSE 1 END) AS liked_by_me
                     FROM media_items m
-                    JOIN categories c ON c.id = m.category_id
+                    {MEDIA_CATEGORY_JOIN}
                     JOIN users u ON u.id = m.user_id
                     LEFT JOIN media_likes l ON l.media_id = m.id
                     LEFT JOIN media_likes l2 ON l2.media_id = m.id AND l2.user_id = %s
@@ -1048,8 +1177,8 @@ class GalleryDatabase:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
-                    """
-                    SELECT m.*, c.name AS category_name, c.slug AS category_slug,
+                    f"""
+                    SELECT m.*, {MEDIA_CATEGORY_SELECT}
                            u.username,
                            CASE WHEN u.public_profile=1 OR u.id=%s THEN u.display_name ELSE u.username END AS display_name,
                            CASE WHEN u.public_profile=1 OR u.id=%s THEN u.bio ELSE NULL END AS user_bio,
@@ -1061,7 +1190,7 @@ class GalleryDatabase:
                            MAX(CASE WHEN b.user_id IS NULL THEN 0 ELSE 1 END) AS bookmarked_by_me,
                            MAX(CASE WHEN l2.user_id IS NULL THEN 0 ELSE 1 END) AS liked_by_me
                     FROM media_items m
-                    JOIN categories c ON c.id = m.category_id
+                    {MEDIA_CATEGORY_JOIN}
                     JOIN users u ON u.id = m.user_id
                     LEFT JOIN media_likes l ON l.media_id = m.id
                     LEFT JOIN media_likes l2 ON l2.media_id = m.id AND l2.user_id = %s
@@ -1148,9 +1277,12 @@ class GalleryDatabase:
             if tag and tag.lower() not in {existing.lower() for existing in clean_tags}:
                 clean_tags.append(tag)
         clean_tags = clean_tags[:12]
-        category_id = int(payload.get("category_id") or 0)
-        if category_id <= 0:
-            raise ValueError("Choose a valid category.")
+        category_id, subcategory_id = await self.resolve_category_ids(
+            category_id=int(payload.get("category_id") or 0),
+            subcategory_id=payload.get("subcategory_id"),
+            subcategory_name=payload.get("subcategory_name"),
+            user_id=user_id,
+        )
         visibility = str(payload.get("visibility") or "public").lower()
         if visibility not in {"public", "unlisted", "private"}:
             raise ValueError("Visibility must be public, unlisted, or private.")
@@ -1160,9 +1292,6 @@ class GalleryDatabase:
         pinned = 1 if payload.get("pinned") else 0
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute("SELECT id FROM categories WHERE id=%s", (category_id,))
-                if not await cur.fetchone():
-                    raise ValueError("Category does not exist.")
                 await cur.execute("SELECT user_id FROM media_items WHERE id=%s AND deleted_at IS NULL", (media_id,))
                 row = await cur.fetchone()
                 if not row:
@@ -1172,7 +1301,7 @@ class GalleryDatabase:
                 await cur.execute(
                     """
                     UPDATE media_items
-                    SET title=%s, description=%s, tags=%s, category_id=%s,
+                    SET title=%s, description=%s, tags=%s, category_id=%s, subcategory_id=%s,
                         visibility=%s, comments_enabled=%s, downloads_enabled=%s,
                         pinned_at=CASE WHEN %s=1 THEN COALESCE(pinned_at, CURRENT_TIMESTAMP) ELSE NULL END,
                         is_adult=%s, adult_marked_by_user=%s,
@@ -1181,7 +1310,7 @@ class GalleryDatabase:
                         moderated_at=CASE WHEN %s=1 THEN CURRENT_TIMESTAMP ELSE moderated_at END
                     WHERE id=%s AND user_id=%s
                     """,
-                    (title, description, json.dumps(clean_tags), category_id, visibility, comments_enabled, downloads_enabled,
+                    (title, description, json.dumps(clean_tags), category_id, subcategory_id, visibility, comments_enabled, downloads_enabled,
                      pinned, is_adult, is_adult, is_adult, is_adult, is_adult, media_id, user_id),
                 )
         return await self.get_media(media_id, user_id)
@@ -1242,8 +1371,8 @@ class GalleryDatabase:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
-                    """
-                    SELECT m.*, c.name AS category_name, c.slug AS category_slug,
+                    f"""
+                    SELECT m.*, {MEDIA_CATEGORY_SELECT}
                            u.username, u.display_name, u.bio AS user_bio, u.website_url AS user_website_url,
                            u.avatar_path AS user_avatar_path, u.profile_color, u.public_profile,
                            COUNT(DISTINCT l.user_id) AS like_count,
@@ -1252,7 +1381,7 @@ class GalleryDatabase:
                            MAX(CASE WHEN l2.user_id IS NULL THEN 0 ELSE 1 END) AS liked_by_me
                     FROM user_follows f
                     JOIN media_items m ON m.user_id=f.followed_id
-                    JOIN categories c ON c.id=m.category_id
+                    {MEDIA_CATEGORY_JOIN}
                     JOIN users u ON u.id=m.user_id
                     LEFT JOIN media_likes l ON l.media_id=m.id
                     LEFT JOIN media_likes l2 ON l2.media_id=m.id AND l2.user_id=%s
@@ -1272,8 +1401,8 @@ class GalleryDatabase:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
-                    """
-                    SELECT m.*, c.name AS category_name, c.slug AS category_slug,
+                    f"""
+                    SELECT m.*, {MEDIA_CATEGORY_SELECT}
                            u.username, u.display_name, u.bio AS user_bio, u.website_url AS user_website_url,
                            u.avatar_path AS user_avatar_path, u.profile_color, u.public_profile,
                            COUNT(DISTINCT l_all.user_id) AS like_count,
@@ -1282,7 +1411,7 @@ class GalleryDatabase:
                            1 AS liked_by_me
                     FROM media_likes liked
                     JOIN media_items m ON m.id=liked.media_id
-                    JOIN categories c ON c.id=m.category_id
+                    {MEDIA_CATEGORY_JOIN}
                     JOIN users u ON u.id=m.user_id
                     LEFT JOIN media_likes l_all ON l_all.media_id=m.id
                     LEFT JOIN media_bookmarks b ON b.media_id=m.id AND b.user_id=%s
@@ -1301,8 +1430,8 @@ class GalleryDatabase:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
-                    """
-                    SELECT m.*, c.name AS category_name, c.slug AS category_slug,
+                    f"""
+                    SELECT m.*, {MEDIA_CATEGORY_SELECT}
                            u.username,
                            CASE WHEN u.public_profile=1 OR u.id=%s THEN u.display_name ELSE u.username END AS display_name,
                            CASE WHEN u.public_profile=1 OR u.id=%s THEN u.bio ELSE NULL END AS user_bio,
@@ -1314,7 +1443,7 @@ class GalleryDatabase:
                            MAX(CASE WHEN b.user_id IS NULL THEN 0 ELSE 1 END) AS bookmarked_by_me,
                            MAX(CASE WHEN l2.user_id IS NULL THEN 0 ELSE 1 END) AS liked_by_me
                     FROM media_items m
-                    JOIN categories c ON c.id = m.category_id
+                    {MEDIA_CATEGORY_JOIN}
                     JOIN users u ON u.id = m.user_id
                     LEFT JOIN media_likes l ON l.media_id = m.id
                     LEFT JOIN media_likes l2 ON l2.media_id = m.id AND l2.user_id = %s
@@ -1404,8 +1533,8 @@ class GalleryDatabase:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
-                    """
-                    SELECT m.*, c.name AS category_name, c.slug AS category_slug,
+                    f"""
+                    SELECT m.*, {MEDIA_CATEGORY_SELECT}
                            u.username, u.display_name, u.bio AS user_bio, u.website_url AS user_website_url,
                            u.avatar_path AS user_avatar_path, u.profile_color, u.public_profile,
                            COUNT(DISTINCT l.user_id) AS like_count,
@@ -1414,7 +1543,7 @@ class GalleryDatabase:
                            MAX(CASE WHEN l2.user_id IS NULL THEN 0 ELSE 1 END) AS liked_by_me
                     FROM media_bookmarks bm
                     JOIN media_items m ON m.id = bm.media_id
-                    JOIN categories c ON c.id = m.category_id
+                    {MEDIA_CATEGORY_JOIN}
                     JOIN users u ON u.id = m.user_id
                     LEFT JOIN media_likes l ON l.media_id = m.id
                     LEFT JOIN media_likes l2 ON l2.media_id = m.id AND l2.user_id = %s
@@ -1543,8 +1672,8 @@ class GalleryDatabase:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
-                    """
-                    SELECT m.*, c.name AS category_name, c.slug AS category_slug,
+                    f"""
+                    SELECT m.*, {MEDIA_CATEGORY_SELECT}
                            u.username,
                            CASE WHEN u.public_profile=1 OR u.id=%s THEN u.display_name ELSE u.username END AS display_name,
                            CASE WHEN u.public_profile=1 OR u.id=%s THEN u.bio ELSE NULL END AS user_bio,
@@ -1557,7 +1686,7 @@ class GalleryDatabase:
                            MAX(CASE WHEN l2.user_id IS NULL THEN 0 ELSE 1 END) AS liked_by_me
                     FROM media_collection_items mci
                     JOIN media_items m ON m.id = mci.media_id
-                    JOIN categories c ON c.id = m.category_id
+                    {MEDIA_CATEGORY_JOIN}
                     JOIN users u ON u.id = m.user_id
                     LEFT JOIN media_likes l ON l.media_id = m.id
                     LEFT JOIN media_likes l2 ON l2.media_id = m.id AND l2.user_id = %s
@@ -2040,7 +2169,7 @@ class GalleryDatabase:
         row["is_adult"] = bool(row.get("is_adult"))
         row["adult_marked_by_user"] = bool(row.get("adult_marked_by_user"))
         row["adult_marked_by_ai"] = bool(row.get("adult_marked_by_ai"))
-        for key in ("like_count", "comment_count", "views", "downloads", "file_size"):
+        for key in ("subcategory_id", "like_count", "comment_count", "views", "downloads", "file_size"):
             if isinstance(row.get(key), Decimal):
                 row[key] = int(row[key])
         return row

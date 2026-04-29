@@ -40,6 +40,7 @@ ADULT_KEYWORDS = {
     "explicit", "porn", "porno", "sex", "sexual", "hentai", "ecchi", "lewd",
     "erotic", "fetish", "onlyfans", "camgirl", "cam boy", "xxx",
 }
+SITE_OWNER_EMAIL = "heavenlyxenusvr@icloud.com"
 
 
 class RegisterRequest(BaseModel):
@@ -96,6 +97,8 @@ class MediaUpdateRequest(BaseModel):
     title: str
     description: str | None = None
     category_id: int
+    subcategory_id: int | None = None
+    subcategory_name: str | None = None
     tags: list[str] = []
     is_adult: bool = False
     visibility: str = "public"
@@ -202,11 +205,27 @@ def _is_age_verified(user: dict[str, Any] | None) -> bool:
     return bool(user and user.get("age_verified_at") and user.get("adult_content_consent"))
 
 
+def _normalized_email(value: str | None) -> str:
+    return str(value or "").strip().lower()
+
+
+def _is_site_owner_user(user: dict[str, Any] | None) -> bool:
+    return bool(user and user.get("email_verified_at") and _normalized_email(user.get("email")) == SITE_OWNER_EMAIL)
+
+
 async def _viewer_can_open_adult(request: Request) -> bool:
     viewer_id = _user_id(_auth_optional(request))
     if not viewer_id:
         return False
     return _is_age_verified(await db.get_user(viewer_id))
+
+
+async def _require_site_owner(request: Request) -> dict[str, Any]:
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    user = await db.get_user(int(auth["id"]))
+    if not _is_site_owner_user(user):
+        raise HTTPException(status_code=403, detail="Only the verified site owner can use this action.")
+    return user
 
 
 def _age_from_birthdate(birthdate: date) -> int:
@@ -342,6 +361,7 @@ def _with_user_urls(request: Request, user: dict[str, Any] | None) -> dict[str, 
     clone = dict(user)
     if clone.get("avatar_path"):
         clone["avatar_url"] = str(request.url_for("serve_user_avatar", user_id=clone["id"]))
+    clone["site_owner"] = _is_site_owner_user(clone)
     return _jsonable(clone)
 
 
@@ -566,26 +586,12 @@ async def live_checks(request: Request) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     try:
         snapshot = await db.site_checks()
+        owner = False
         checks.append({"id": "api", "label": "API reachable", "ok": True, "detail": "Backend responded."})
         checks.append({"id": "db", "label": "Database reachable", "ok": True, "detail": f"Schema {settings.db_schema} responded."})
-        missing = int(snapshot.get("missing_db_files") or 0)
-        checks.append({
-            "id": "file_store",
-            "label": "DB file store coverage",
-            "ok": missing == 0,
-            "severity": "warn" if missing else "ok",
-            "detail": "All active posts are linked to DB file blobs." if missing == 0 else f"{missing} active post(s) still need DB blob migration or legacy disk fallback.",
-        })
-        reports = int(snapshot.get("open_reports") or 0)
-        checks.append({
-            "id": "reports",
-            "label": "Open reports",
-            "ok": reports == 0,
-            "severity": "warn" if reports else "ok",
-            "detail": "No open user reports." if reports == 0 else f"{reports} report(s) need review.",
-        })
         if auth:
             user = await db.get_user(int(auth["id"]))
+            owner = _is_site_owner_user(user)
             checks.append({"id": "session", "label": "Login session", "ok": bool(user), "detail": "Signed in." if user else "Token is invalid or account is gone."})
             if user and user.get("email"):
                 checks.append({
@@ -595,6 +601,25 @@ async def live_checks(request: Request) -> dict[str, Any]:
                     "severity": "warn" if not user.get("email_verified_at") else "ok",
                     "detail": "Email verified." if user.get("email_verified_at") else "Email verification is still pending.",
                 })
+        if owner:
+            missing = int(snapshot.get("missing_db_files") or 0)
+            checks.append({
+                "id": "file_store",
+                "label": "DB file store coverage",
+                "ok": missing == 0,
+                "severity": "warn" if missing else "ok",
+                "detail": "All active posts are linked to DB file blobs." if missing == 0 else f"{missing} active post(s) still need DB blob migration or legacy disk fallback.",
+            })
+            reports = int(snapshot.get("open_reports") or 0)
+            checks.append({
+                "id": "reports",
+                "label": "Open reports",
+                "ok": reports == 0,
+                "severity": "warn" if reports else "ok",
+                "detail": "No open user reports." if reports == 0 else f"{reports} report(s) need review.",
+            })
+        else:
+            snapshot = {"media_active": snapshot.get("media_active"), "db_time": snapshot.get("db_time")}
         status = "ok" if all(c.get("ok") or c.get("severity") == "warn" for c in checks) else "attention"
         return {"ok": True, "status": status, "checks": checks, "snapshot": _jsonable(snapshot), "server_time": datetime.utcnow().isoformat() + "Z"}
     except Exception as exc:
@@ -614,11 +639,7 @@ async def live_checks(request: Request) -> dict[str, Any]:
 
 @app.post("/api/live/migrate")
 async def migrate_legacy_files(request: Request) -> dict[str, Any]:
-    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
-    # Only the site owner should trigger DB BLOB backfills from the public frontend.
-    user = await db.get_user(int(auth["id"]))
-    if not user or str(user.get("username") or "").lower() not in {"heavenlyxenusvr", "desmond"}:
-        raise HTTPException(status_code=403, detail="Only the site owner can run DB file migration.")
+    await _require_site_owner(request)
     try:
         migrated = await db.migrate_legacy_media_files(limit=10)
         snapshot = await db.site_checks()
@@ -967,6 +988,7 @@ async def media(
     request: Request,
     media_kind: str | None = None,
     category_id: int | None = None,
+    subcategory_id: int | None = None,
     q: str | None = None,
     uploader: str | None = None,
     min_size: int | None = None,
@@ -984,6 +1006,7 @@ async def media(
         viewer_id=viewer_id,
         media_kind=media_kind,
         category_id=category_id,
+        subcategory_id=subcategory_id,
         query=(q or "").strip()[:80] or None,
         uploader=(uploader or "").strip()[:80] or None,
         min_size=min_size,
@@ -1065,7 +1088,9 @@ async def upload_media(
     title: str = Form(...),
     description: str = Form(""),
     category_id: int | None = Form(None),
+    subcategory_id: int | None = Form(None),
     category_name: str = Form(""),
+    subcategory_name: str = Form(""),
     category_kind: str = Form("mixed"),
     tags: str = Form(""),
     is_adult: bool = Form(False),
@@ -1085,6 +1110,12 @@ async def upload_media(
     if not category_id:
         category = await db.create_category(category_name, category_kind, int(auth["id"]))
         category_id = int(category["id"])
+    category_id, subcategory_id = await db.resolve_category_ids(
+        category_id=category_id,
+        subcategory_id=subcategory_id,
+        subcategory_name=subcategory_name,
+        user_id=int(auth["id"]),
+    )
     parsed_tags = _parse_tags(tags)
     original_filename = Path(file.filename or "upload").name[:255]
     moderation = _moderate_upload(
@@ -1125,6 +1156,7 @@ async def upload_media(
         {
             "user_id": int(auth["id"]),
             "category_id": category_id,
+            "subcategory_id": subcategory_id,
             "title": title,
             "description": description.strip()[:2000] or None,
             "tags": parsed_tags,
@@ -1357,5 +1389,6 @@ async def download_media(media_id: int, request: Request, access: str | None = N
 
 
 @app.get("/api/stats")
-async def stats() -> dict[str, Any]:
+async def stats(request: Request) -> dict[str, Any]:
+    await _require_site_owner(request)
     return {"stats": _jsonable(await db.stats())}

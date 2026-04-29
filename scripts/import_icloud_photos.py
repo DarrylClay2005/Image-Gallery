@@ -6,12 +6,19 @@ import mimetypes
 import os
 import re
 import subprocess
+import sys
 from collections import Counter
 from pathlib import Path
 
 import magic
 import pymysql
 from PIL import Image
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from app.classification import infer_category_pair
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -241,64 +248,6 @@ def extract_tags(path: Path, category: str, media_kind: str, size: tuple[int, in
     return tags[:12]
 
 
-def infer_category(path: Path, media_kind: str, size: tuple[int, int] | None) -> str:
-    tokens = set(clean_tokens(path))
-    stem = path.stem.lower()
-
-    mlp_tokens = {
-        "mlp", "pony", "equestria", "twilight", "pinkie", "fluttershy", "rarity",
-        "applejack", "scootaloo", "rainbow", "dash", "derpy", "sunset", "starlight",
-        "trixie", "celestia", "luna", "discord", "cutie", "cmc",
-    }
-    fnaf_tokens = {
-        "fnaf", "freddy", "bonnie", "chica", "foxy", "roxanne", "wolf", "frenni",
-        "animatronic", "fazbear", "bonfie",
-    }
-    dazzlings_tokens = {"dazzlings", "adagio", "aria", "sonata"}
-    neptunia_tokens = {"neptunia", "neptune", "nepgear", "noire", "blanc", "vert", "uzume", "plutia"}
-    xenoblade_tokens = {"xenoblade", "pyra", "mythra", "nia", "mio", "eunie", "taion", "lanz", "noah"}
-    cartoon_tokens = {"boondocks", "cartoon", "anime"}
-    sonic_tokens = {"sonic", "tails", "amy", "shadow", "knuckles"}
-
-    if path.suffix.lower() == ".gif":
-        return "GIFs"
-    if tokens & sonic_tokens and tokens & mlp_tokens:
-        return "Crossovers"
-    if tokens & neptunia_tokens:
-        return "Hyperdimension Neptunia"
-    if tokens & xenoblade_tokens:
-        return "Xenoblade"
-    if tokens & fnaf_tokens:
-        return "FNAF"
-    if tokens & dazzlings_tokens:
-        if "aria" in tokens and not ({"sonata", "adagio", "dazzlings"} & tokens):
-            return "Aria Blaze (Solo)"
-        if "sonata" in tokens and not ({"aria", "adagio", "dazzlings"} & tokens):
-            return "Sonata Dusk"
-        return "Dazzlings"
-    if tokens & mlp_tokens or "my little pony" in stem:
-        return "My Little Pony"
-    if tokens & sonic_tokens:
-        return "Sonic"
-    if tokens & cartoon_tokens:
-        return "Cartoon"
-    if {"meme", "funny", "reaction"} & tokens:
-        return "Memes"
-    if size:
-        width, height = size
-        if width and height:
-            ratio = width / height
-            if 0.9 <= ratio <= 1.1 and max(width, height) <= 2048:
-                return "Profile Pictures"
-            if ratio < 0.85:
-                return "Phone Backgrounds"
-            if ratio >= 1.2:
-                return "Desktop Backgrounds"
-    if media_kind == "video":
-        return "Videos"
-    return "Wallpapers"
-
-
 def ensure_category(cur: pymysql.cursors.Cursor, category_name: str, media_kind: str) -> int:
     cur.execute("SELECT id FROM categories WHERE name=%s LIMIT 1", (category_name,))
     row = cur.fetchone()
@@ -309,6 +258,22 @@ def ensure_category(cur: pymysql.cursors.Cursor, category_name: str, media_kind:
     cur.execute(
         "INSERT INTO categories (name, slug, media_kind, created_by) VALUES (%s, %s, %s, NULL)",
         (category_name, slug, stored_kind),
+    )
+    return int(cur.lastrowid)
+
+
+def ensure_subcategory(cur: pymysql.cursors.Cursor, category_id: int, subcategory_name: str | None) -> int | None:
+    normalized = " ".join(str(subcategory_name or "").strip().split())[:80]
+    if not normalized:
+        return None
+    cur.execute("SELECT id FROM subcategories WHERE category_id=%s AND name=%s LIMIT 1", (category_id, normalized))
+    row = cur.fetchone()
+    if row:
+        return int(row[0])
+    slug = re.sub(r"[^a-z0-9]+", "-", normalized.lower()).strip("-")[:90] or "subcategory"
+    cur.execute(
+        "INSERT INTO subcategories (category_id, name, slug, created_by) VALUES (%s, %s, %s, NULL)",
+        (category_id, normalized, slug),
     )
     return int(cur.lastrowid)
 
@@ -379,7 +344,12 @@ def main() -> int:
                         continue
                     mime_type, media_kind = detect_media(path)
                     size = image_size(path) if media_kind == "image" else video_size(path)
-                    category = infer_category(path, media_kind, size)
+                    category, subcategory = infer_category_pair(
+                        filename=path.name,
+                        media_kind=media_kind,
+                        title=build_title(path),
+                        size=size,
+                    )
                     title = build_title(path)
                     tags = extract_tags(path, category, media_kind, size)
                     planned.append(
@@ -390,6 +360,7 @@ def main() -> int:
                             "media_kind": media_kind,
                             "size": size,
                             "category": category,
+                            "subcategory": subcategory,
                             "title": title,
                             "tags": tags,
                         }
@@ -426,11 +397,13 @@ def main() -> int:
                 mime_type = str(item["mime_type"])
                 media_kind = str(item["media_kind"])
                 category_name = str(item["category"])
+                subcategory_name = str(item.get("subcategory") or "").strip() or None
                 title = str(item["title"])
                 tags = list(item["tags"])
                 file_size = path.stat().st_size
                 moderation_bits = moderation(title, path.name, tags)
                 category_id = ensure_category(cur, category_name, media_kind)
+                subcategory_id = ensure_subcategory(cur, category_id, subcategory_name)
 
                 try:
                     if sha in existing_file_ids:
@@ -464,15 +437,16 @@ def main() -> int:
                     cur.execute(
                         """
                         INSERT INTO media_items
-                          (user_id, category_id, title, description, tags, media_kind, mime_type, original_filename,
+                          (user_id, category_id, subcategory_id, title, description, tags, media_kind, mime_type, original_filename,
                            storage_path, file_size, media_file_id, content_sha256, visibility, comments_enabled,
                            downloads_enabled, pinned_at, is_adult, adult_marked_by_user, adult_marked_by_ai,
                            moderation_status, moderation_score, moderation_reason, moderated_at)
-                        VALUES (%s, %s, %s, NULL, %s, %s, %s, %s, %s, %s, %s, %s, 'public', 1, 1, NULL, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        VALUES (%s, %s, %s, %s, NULL, %s, %s, %s, %s, %s, %s, %s, %s, 'public', 1, 1, NULL, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                         """,
                         (
                             user_id,
                             category_id,
+                            subcategory_id,
                             title[:160],
                             json.dumps(tags),
                             media_kind,
