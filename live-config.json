@@ -1,6 +1,6 @@
 {
-  "gallery_url": "https://banners-ensemble-shops-mustang.trycloudflare.com",
-  "status": "live",
+  "gallery_url": "",
+  "status": "offline",
   "local_urls": ["http://127.0.0.1:8788", "http://localhost:8788", "http://192.168.12.188:8788"],
-  "updated_at": "2026-04-29T11:15:00-05:00"
+  "updated_at": "2026-04-29T11:48:53-05:00"
 }
