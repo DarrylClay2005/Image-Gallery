@@ -17,6 +17,17 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.classification import infer_category_pair
 
 
+MANUAL_OVERRIDES: dict[int, tuple[str, str | None]] = {
+    # Reviewed from DB-backed visual contact sheets where titles/filenames were too generic.
+    45: ("My Little Pony", "Mane 6"),
+    48: ("My Little Pony", "Fluttershy"),
+    91: ("My Little Pony", "Mane 6"),
+    94: ("My Little Pony", "Equestria Girls"),
+    95: ("My Little Pony", "Mane 6"),
+    98: ("My Little Pony", "Equestria Girls"),
+}
+
+
 def load_env_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if not path.exists():
@@ -112,11 +123,14 @@ def main() -> int:
 
             for row in rows:
                 media_id, title, filename, media_kind, category_id, category_name, subcategory_id, subcategory_name = row
-                next_category, next_subcategory = infer_category_pair(
-                    filename=str(filename or title or f"media-{media_id}"),
-                    media_kind=str(media_kind or "image"),
-                    title=str(title or ""),
-                    current_category=str(category_name or ""),
+                next_category, next_subcategory = MANUAL_OVERRIDES.get(
+                    int(media_id),
+                    infer_category_pair(
+                        filename=str(filename or title or f"media-{media_id}"),
+                        media_kind=str(media_kind or "image"),
+                        title=str(title or ""),
+                        current_category=str(category_name or ""),
+                    ),
                 )
                 next_category_id = ensure_category(cur, next_category, str(media_kind or "image"))
                 next_subcategory_id = ensure_subcategory(cur, next_category_id, next_subcategory)

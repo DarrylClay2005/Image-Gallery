@@ -74,6 +74,7 @@ let currentPage = "discover";
 let activeCollectionId = null;
 let collectionsMineMode = false;
 let profilePageData = null;
+let profileCustomizeOpen = false;
 let friendPanelState = { incoming: [], outgoing: [], friends: [] };
 let studioPageState = { items: [], totals: { views: 0, downloads: 0, likes: 0 } };
 
@@ -486,8 +487,19 @@ function renderBackendHelp(err) {
 }
 
 function renderAuth() {
-  $("auth-open").textContent = currentUser ? currentUser.display_name || currentUser.username : "Login";
-  $("auth-open").title = currentUser ? "Open your profile" : "Login";
+  $("auth-open").classList.toggle("avatar", Boolean(currentUser));
+  $("auth-open").classList.toggle("tiny", Boolean(currentUser));
+  $("auth-open").classList.toggle("is-account-avatar", Boolean(currentUser));
+  if (currentUser) {
+    renderButtonAvatar("auth-open", currentUser, currentUser.display_name || currentUser.username || "IG");
+    $("auth-open").title = `Open @${currentUser.username}`;
+    $("auth-open").setAttribute("aria-label", `Open @${currentUser.username}`);
+  } else {
+    $("auth-open").textContent = "Login";
+    $("auth-open").title = "Login";
+    $("auth-open").setAttribute("aria-label", "Login");
+    $("auth-open").style.borderColor = "";
+  }
   $("logout").hidden = !currentUser;
   $("settings-open").hidden = !currentUser;
   $("studio-open").hidden = !currentUser;
@@ -612,6 +624,19 @@ function renderAvatar(id, user) {
   const name = user?.display_name || user?.username || "IG";
   if (user?.avatar_url || user?.user_avatar_url) {
     el.innerHTML = `<img src="${user.avatar_url || user.user_avatar_url}" alt="">`;
+  } else {
+    el.textContent = name.slice(0, 2).toUpperCase();
+  }
+  el.style.borderColor = user?.profile_color || userSettings().accent_color || "#37c9a7";
+}
+
+function renderButtonAvatar(id, user, fallbackLabel = "IG") {
+  const el = safeEl(id);
+  if (!el) return;
+  const name = user?.display_name || user?.username || fallbackLabel;
+  const avatarUrl = user?.avatar_url || user?.user_avatar_url || "";
+  if (avatarUrl) {
+    el.innerHTML = `<img src="${avatarUrl}" alt="">`;
   } else {
     el.textContent = name.slice(0, 2).toUpperCase();
   }
@@ -871,6 +896,12 @@ function fillSettingsForm() {
   setChecked("pref-profile-show-joined-date", prefs.profile_show_joined_date !== false);
   setTextIfPresent("settings-email-status", currentUser.email ? (currentUser.email_verified ? "Email verified" : "Email verification pending") : "No email set");
   setTextIfPresent("settings-age-status", currentUser.age_verified ? "Verified" : "Not verified");
+  const preview = safeEl("settings-avatar-preview");
+  if (preview?.dataset.objectUrl) {
+    URL.revokeObjectURL(preview.dataset.objectUrl);
+    delete preview.dataset.objectUrl;
+  }
+  if (safeEl("settings-avatar-file")) $("settings-avatar-file").value = "";
   renderAvatar("settings-avatar-preview", currentUser);
 }
 
@@ -2501,6 +2532,61 @@ async function openProfile(username) {
   setCurrentPage("profile");
 }
 
+function profileCustomizationMarkup(user) {
+  if (!currentUser || currentUser.username !== user.username) return "";
+  const prefs = { ...DEFAULT_USER_SETTINGS, ...(currentUser.user_settings || {}), ...(user.user_settings || {}) };
+  return `
+    <section class="profile-section-card profile-customize-panel">
+      <header>
+        <div>
+          <h3>Profile Customization</h3>
+          <p class="muted">Tune how your public profile page looks without leaving the profile tab.</p>
+        </div>
+        <div class="card-actions">
+          <button type="button" data-profile-customize-toggle="1">${profileCustomizeOpen ? "Hide Controls" : "Customize Profile"}</button>
+          <button type="button" data-open-settings="1">Account Settings</button>
+        </div>
+      </header>
+      ${profileCustomizeOpen ? `
+        <div class="form-grid">
+          <label class="field">
+            <span>Profile layout</span>
+            <select id="profile-page-layout">
+              <option value="spotlight" ${prefs.profile_layout === "spotlight" ? "selected" : ""}>Spotlight</option>
+              <option value="magazine" ${prefs.profile_layout === "magazine" ? "selected" : ""}>Magazine</option>
+              <option value="stack" ${prefs.profile_layout === "stack" ? "selected" : ""}>Stacked</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Profile banner</span>
+            <select id="profile-page-banner-style">
+              <option value="gradient" ${prefs.profile_banner_style === "gradient" ? "selected" : ""}>Gradient</option>
+              <option value="mesh" ${prefs.profile_banner_style === "mesh" ? "selected" : ""}>Mesh</option>
+              <option value="frame" ${prefs.profile_banner_style === "frame" ? "selected" : ""}>Framed</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Profile cards</span>
+            <select id="profile-page-card-style">
+              <option value="glass" ${prefs.profile_card_style === "glass" ? "selected" : ""}>Glass</option>
+              <option value="solid" ${prefs.profile_card_style === "solid" ? "selected" : ""}>Solid</option>
+              <option value="outline" ${prefs.profile_card_style === "outline" ? "selected" : ""}>Outline</option>
+            </select>
+          </label>
+          <label class="check-card">
+            <input id="profile-page-show-joined-date" type="checkbox" ${prefs.profile_show_joined_date !== false ? "checked" : ""} />
+            <span>Show joined date on the profile page</span>
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="primary" data-profile-customize-save="1">Save Profile Style</button>
+          <span id="profile-customize-status" class="muted"></span>
+        </div>
+      ` : ""}
+    </section>
+  `;
+}
+
 function renderProfile(data) {
   const user = data.user || {};
   const prefs = { ...DEFAULT_USER_SETTINGS, ...(user.user_settings || {}) };
@@ -2557,7 +2643,7 @@ function renderProfile(data) {
           <button type="button" data-friend-user="${user.id}" ${["self", "friends", "pending_out"].includes(user.friend_status) ? "disabled" : ""}>${friendButtonLabel(user.friend_status)}</button>
           <button type="button" data-copy-profile="${escapeHtml(user.username || "")}">Copy Link</button>
           ${user.website_url ? `<a class="button-link" href="${escapeHtml(user.website_url)}" target="_blank" rel="noopener">Website</a>` : ""}
-          ${currentUser?.username === user.username ? `<button type="button" data-open-settings="1">Customize</button>` : ""}
+          ${currentUser?.username === user.username ? `<button type="button" data-profile-customize-toggle="1">${profileCustomizeOpen ? "Hide Controls" : "Customize Profile"}</button>` : ""}
         </div>
       </div>
       <div class="profile-spotlight-grid">
@@ -2566,6 +2652,7 @@ function renderProfile(data) {
         <article class="profile-insight-card"><h3>Likes</h3><strong>${Number(user.like_count || 0)}</strong><span class="muted">Total likes across public work</span></article>
         <article class="profile-insight-card"><h3>Downloads</h3><strong>${Number(user.download_count || 0)}</strong><span class="muted">Downloads on public posts</span></article>
       </div>
+      ${profileCustomizationMarkup(user)}
     </div>
     <div class="profile-dashboard profile-layout-${escapeHtml(prefs.profile_layout || "spotlight")} profile-card-style-${escapeHtml(prefs.profile_card_style || "glass")}">
       <div class="profile-column">
@@ -2718,6 +2805,54 @@ async function submitReport(event) {
   }
 }
 
+function previewSelectedAvatar() {
+  const input = safeEl("settings-avatar-file");
+  const preview = safeEl("settings-avatar-preview");
+  if (!input || !preview) return;
+  if (preview.dataset.objectUrl) {
+    URL.revokeObjectURL(preview.dataset.objectUrl);
+    delete preview.dataset.objectUrl;
+  }
+  const file = input.files?.[0];
+  if (!file) {
+    if (currentUser) renderAvatar("settings-avatar-preview", currentUser);
+    return;
+  }
+  const objectUrl = URL.createObjectURL(file);
+  preview.innerHTML = `<img src="${objectUrl}" alt="">`;
+  preview.dataset.objectUrl = objectUrl;
+  preview.style.borderColor = currentUser?.profile_color || userSettings().accent_color || "#37c9a7";
+}
+
+async function saveProfileCustomization() {
+  if (!currentUser) return safeEl("auth-dialog")?.showModal();
+  let status = safeEl("profile-customize-status");
+  if (status) status.textContent = "Saving profile style...";
+  try {
+    const data = await apiFetch("/api/me/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        profile_layout: safeEl("profile-page-layout")?.value || "spotlight",
+        profile_banner_style: safeEl("profile-page-banner-style")?.value || "gradient",
+        profile_card_style: safeEl("profile-page-card-style")?.value || "glass",
+        profile_show_joined_date: Boolean(safeEl("profile-page-show-joined-date")?.checked),
+      }),
+    });
+    currentUser = data.user || currentUser;
+    writeStore(USER_KEY, JSON.stringify(currentUser));
+    if (profilePageData?.user) {
+      profilePageData = { ...profilePageData, user: { ...profilePageData.user, ...currentUser } };
+    }
+    renderAuth();
+    renderProfile(profilePageData || { user: currentUser, media: [], collections: [], friends: [] });
+    status = safeEl("profile-customize-status");
+    if (status) status.textContent = "Profile style saved.";
+  } catch (err) {
+    if (status) status.textContent = err.message;
+  }
+}
+
 async function saveAvatar() {
   if (!currentUser) return;
   const file = $("settings-avatar-file").files[0];
@@ -2726,11 +2861,18 @@ async function saveAvatar() {
   const body = new FormData();
   body.set("file", file);
   try {
-    const data = await apiFetch("/api/me/avatar", { method: "POST", body });
+    setNotice("settings-error", "Saving profile picture...", "success");
+    const data = await apiUpload("/api/me/avatar", body);
     currentUser = data.user;
     writeStore(USER_KEY, JSON.stringify(currentUser));
     renderAuth();
     fillSettingsForm();
+    if (profilePageData?.user && currentUser?.username === profilePageData.user.username) {
+      profilePageData = { ...profilePageData, user: { ...profilePageData.user, ...currentUser } };
+      renderProfile(profilePageData);
+    }
+    setNotice("settings-error", "Profile picture saved.", "success");
+    safeEl("settings-avatar-file").value = "";
   } catch (err) {
     setNotice("settings-error", err.message);
   }
@@ -3266,6 +3408,7 @@ function bindEvents() {
   $("age-verify-form").addEventListener("submit", submitAgeVerification);
   $("age-close").addEventListener("click", () => $("age-dialog").close());
   $("avatar-save").addEventListener("click", saveAvatar);
+  $("settings-avatar-file").addEventListener("change", previewSelectedAvatar);
   $("upload-open").addEventListener("click", () => currentUser ? $("upload-dialog").showModal() : $("auth-dialog").showModal());
   if ($("upload-close")) $("upload-close").addEventListener("click", closeUploadDialog);
   $("upload-form").addEventListener("submit", submitUpload);
@@ -3427,6 +3570,8 @@ function bindEvents() {
     const follow = event.target.closest("[data-follow-user]");
     const friend = event.target.closest("[data-friend-user]");
     const copyProfile = event.target.closest("[data-copy-profile]");
+    const profileCustomizeToggle = event.target.closest("[data-profile-customize-toggle]");
+    const profileCustomizeSave = event.target.closest("[data-profile-customize-save]");
     const settings = event.target.closest("[data-open-settings]");
     if (open && !handleAdultOpen(open.dataset.open)) await openDetail(open.dataset.open);
     if (collection) {
@@ -3437,6 +3582,15 @@ function bindEvents() {
     if (follow) await toggleFollowUser(follow.dataset.followUser);
     if (friend) await sendFriendRequest(friend.dataset.friendUser);
     if (copyProfile) await copyProfileLink(copyProfile.dataset.copyProfile);
+    if (profileCustomizeToggle) {
+      profileCustomizeOpen = !profileCustomizeOpen;
+      if (profilePageData) renderProfile(profilePageData);
+      return;
+    }
+    if (profileCustomizeSave) {
+      await saveProfileCustomization();
+      return;
+    }
     if (settings) openSettingsPanel();
   });
   $("collections-list").addEventListener("click", async (event) => {

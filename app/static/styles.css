@@ -1459,6 +1459,20 @@ dialog.modal::backdrop { background: rgba(0, 0, 0, 0.72); }
 #upload-form .modal-actions { position: sticky; bottom: 0; z-index: 4; background: var(--panel, #10161d); padding-top: 10px; }
 #upload-close { min-width: 40px; }
 #auth-open { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+#auth-open.is-account-avatar {
+  width: 42px;
+  height: 42px;
+  min-width: 42px;
+  padding: 0;
+  border-radius: 999px;
+  max-width: none;
+}
+#auth-open.is-account-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
 @media (max-width: 640px) {
   dialog.modal, .modal-shell.wide { width: calc(100vw - 10px); max-width: calc(100vw - 10px); }
   .modal-shell { padding: 12px; max-height: calc(100dvh - 10px); }
@@ -1471,6 +1485,22 @@ dialog.compare-modal,
 dialog.slideshow-modal,
 dialog.insights-modal {
   width: min(1280px, calc(100vw - 18px));
+}
+
+.profile-customize-panel {
+  margin-top: 18px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 10%, var(--panel)) 0%, var(--panel-2) 100%);
+}
+
+.profile-customize-panel h3 {
+  margin: 0 0 8px;
+}
+
+.profile-customize-panel .muted {
+  margin-top: 0;
 }
 dialog.compare-modal .modal-shell.wide,
 dialog.slideshow-modal .modal-shell,

@@ -28,6 +28,10 @@ def _single_match(tokens: set[str], mapping: list[tuple[str, set[str]]]) -> str 
     return None
 
 
+def _matches_all(tokens: set[str], *values: str) -> bool:
+    return set(values).issubset(tokens)
+
+
 def canonical_category_pair(category: str | None, subcategory: str | None = None) -> tuple[str | None, str | None]:
     main = " ".join(str(category or "").strip().split())[:80] or None
     sub = " ".join(str(subcategory or "").strip().split())[:80] or None
@@ -38,6 +42,8 @@ def canonical_category_pair(category: str | None, subcategory: str | None = None
         "Sonata Dusk": ("My Little Pony", "Sonata Dusk"),
         "Dazzlings": ("My Little Pony", "Dazzlings"),
         "My Little Pony (Fluttershy)": ("My Little Pony", "Fluttershy"),
+        "My Little Pony (Mane 6)": ("My Little Pony", "Mane 6"),
+        "My Little Pony (Equestria Girls)": ("My Little Pony", "Equestria Girls"),
         "KPOP Demon Hunters (Huntrix)": ("KPOP Demon Hunters", "Huntrix"),
         "KPOP Demon Hunters (Mira)": ("KPOP Demon Hunters", "Mira"),
         "Resident Evil (Leon)": ("Resident Evil", "Leon"),
@@ -80,9 +86,9 @@ def infer_category_pair(
         ("Aria Blaze", {"aria"}),
         ("Sonata Dusk", {"sonata"}),
         ("Adagio Dazzle", {"adagio"}),
-        ("Fluttershy", {"fluttershy"}),
-        ("Twilight Sparkle", {"twilight"}),
-        ("Rainbow Dash", {"rainbow", "dash"}),
+        ("Fluttershy", {"fluttershy", "flutter", "fluttertone", "flutterwitch", "flutterfrolic", "appleshy"}),
+        ("Twilight Sparkle", {"twilight", "twilights"}),
+        ("Rainbow Dash", {"dashie", "rainbowdash"}),
         ("Pinkie Pie", {"pinkie"}),
         ("Rarity", {"rarity"}),
         ("Applejack", {"applejack"}),
@@ -125,9 +131,10 @@ def infer_category_pair(
     ]
     fnaf_subcategories = [
         ("Freddy", {"freddy"}),
-        ("Bonnie", {"bonnie"}),
+        ("Bonnie", {"bonnie", "bonfie"}),
         ("Chica", {"chica"}),
         ("Foxy", {"foxy"}),
+        ("Frenni", {"frenni"}),
         ("Roxanne Wolf", {"roxanne", "roxy"}),
     ]
     resident_evil_subcategories = [
@@ -155,30 +162,72 @@ def infer_category_pair(
         return "Resident Evil", _single_match(tokens, resident_evil_subcategories)
 
     if _has_any(tokens, neptunia_tokens) or (current_main and current_main == "Hyperdimension Neptunia"):
-        return "Hyperdimension Neptunia", _single_match(tokens, neptunia_subcategories)
+        neptunia_hits = [label for label, aliases in neptunia_subcategories if _has_any(tokens, aliases)]
+        if len(neptunia_hits) > 1:
+            return "Hyperdimension Neptunia", None
+        return "Hyperdimension Neptunia", neptunia_hits[0] if neptunia_hits else None
 
     if _has_any(tokens, xenoblade_tokens) or (current_main and current_main == "Xenoblade"):
-        return "Xenoblade", _single_match(tokens, xenoblade_subcategories)
+        xenoblade_hits = [label for label, aliases in xenoblade_subcategories if _has_any(tokens, aliases)]
+        if len(xenoblade_hits) > 1:
+            return "Xenoblade", None
+        return "Xenoblade", xenoblade_hits[0] if xenoblade_hits else None
 
     if _has_any(tokens, fnaf_tokens) or (current_main and current_main == "FNAF"):
-        return "FNAF", _single_match(tokens, fnaf_subcategories)
+        fnaf_hits = [label for label, aliases in fnaf_subcategories if _has_any(tokens, aliases)]
+        if len(fnaf_hits) > 1:
+            return "FNAF", None
+        return "FNAF", fnaf_hits[0] if fnaf_hits else None
 
     if (_has_any(tokens, sonic_tokens) and _has_any(tokens, mlp_tokens)) or (current_main and current_main == "Crossovers"):
         return "Crossovers", _single_match(tokens, sonic_subcategories) or _single_match(tokens, mlp_subcategories)
 
     if _has_any(tokens, mlp_tokens) or _has_any(tokens, dazzlings_tokens) or current_main == "My Little Pony":
+        dazzling_hits: list[str] = []
+        if "aria" in tokens:
+            dazzling_hits.append("Aria Blaze")
+        if "sonata" in tokens:
+            dazzling_hits.append("Sonata Dusk")
+        if "adagio" in tokens:
+            dazzling_hits.append("Adagio Dazzle")
         if _has_any(tokens, dazzlings_tokens):
-            if "aria" in tokens and not _has_any(tokens, {"sonata", "adagio"}):
-                return "My Little Pony", "Aria Blaze"
-            if "sonata" in tokens and not _has_any(tokens, {"aria", "adagio"}):
-                return "My Little Pony", "Sonata Dusk"
-            if "adagio" in tokens and not _has_any(tokens, {"aria", "sonata"}):
-                return "My Little Pony", "Adagio Dazzle"
-            return "My Little Pony", "Dazzlings"
-        mane_six_hits = sum(1 for _, aliases in mlp_subcategories[3:9] if _has_any(tokens, aliases))
-        if mane_six_hits >= 2:
+            if len(dazzling_hits) > 1 or "dazzlings" in tokens:
+                return "My Little Pony", "Dazzlings"
+            if dazzling_hits:
+                return "My Little Pony", dazzling_hits[0]
+
+        if _matches_all(tokens, "equestria", "girls") or _matches_all(tokens, "equestrian", "girls") or "eqg" in tokens or _matches_all(tokens, "rainbow", "rocks") or _matches_all(tokens, "crystal", "prep"):
+            if dazzling_hits:
+                return "My Little Pony", "Dazzlings"
+            if _matches_all(tokens, "mane", "six") or _matches_all(tokens, "mane", "6"):
+                return "My Little Pony", "Equestria Girls"
+            return "My Little Pony", "Equestria Girls"
+
+        mlp_character_hits: list[str] = []
+        if _matches_all(tokens, "rainbow", "dash") or "dashie" in tokens or "rainbowdash" in tokens or "dash" in tokens:
+            if not _matches_all(tokens, "rainbow", "rocks"):
+                mlp_character_hits.append("Rainbow Dash")
+        for label, aliases in mlp_subcategories:
+            if label == "Rainbow Dash":
+                continue
+            if _has_any(tokens, aliases):
+                mlp_character_hits.append(label)
+        if _matches_all(tokens, "cutie", "mark", "crusaders") or "crusaders" in tokens or "cmc" in tokens:
+            return "My Little Pony", "Cutie Mark Crusaders"
+        if _matches_all(tokens, "mane", "6") or _matches_all(tokens, "mane", "six"):
             return "My Little Pony", "Mane 6"
-        return "My Little Pony", _single_match(tokens, mlp_subcategories)
+        if len({hit for hit in mlp_character_hits if hit in {"Fluttershy", "Twilight Sparkle", "Rainbow Dash", "Pinkie Pie", "Rarity", "Applejack"}}) >= 2:
+            return "My Little Pony", "Mane 6"
+        if mlp_character_hits:
+            unique_hits: list[str] = []
+            for hit in mlp_character_hits:
+                if hit not in unique_hits:
+                    unique_hits.append(hit)
+            if len(unique_hits) == 1:
+                return "My Little Pony", unique_hits[0]
+            if len(unique_hits) > 1:
+                return "My Little Pony", None
+        return "My Little Pony", None
 
     if _has_any(tokens, sonic_tokens) or (current_main and current_main == "Sonic"):
         return "Sonic", _single_match(tokens, sonic_subcategories)

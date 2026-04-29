@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.classification import infer_category_pair
+from app.classification import canonical_category_pair, infer_category_pair
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -150,24 +150,26 @@ def title_case_token(token: str) -> str:
     return lower.capitalize()
 
 
-def build_title(path: Path) -> str:
+def build_title(path: Path, category: str | None = None, subcategory: str | None = None) -> str:
     stem = path.stem
     if re.fullmatch(r"[0-9A-Fa-f-]{16,}", stem):
-        return f"Imported Media {stem.replace('-', '')[:12]}"[:160]
+        label = subcategory or category or "Imported Media"
+        return f"{label} Artwork {stem.replace('-', '')[:12]}".strip()[:160]
     stem = re.sub(r"[_\-]+", " ", stem)
     stem = re.sub(r"\s+", " ", stem).strip()
     tokens = stem.split()
     if not tokens:
-        return path.name[:160]
+        label = subcategory or category or path.name
+        return str(label)[:160]
     alpha_tokens = [token for token in tokens if re.search(r"[A-Za-z]{3,}", token)]
     hexish_tokens = [token for token in tokens if re.fullmatch(r"[0-9A-Fa-f]{6,}", token)]
     if not alpha_tokens or len(hexish_tokens) == len(tokens):
-        label = "Imported Media"
+        label = subcategory or category or "Imported Media"
         suffix = (tokens[0] if tokens else path.stem)[:12]
         if path.suffix.lower() == ".gif":
-            label = "Imported GIF"
+            label = subcategory or category or "Imported GIF"
         elif path.suffix.lower() in {".mp4", ".mov", ".m4v", ".webm", ".ogg"}:
-            label = "Imported Video"
+            label = subcategory or category or "Imported Video"
         return f"{label} {suffix}".strip()[:160]
     title = " ".join(title_case_token(token) for token in tokens)
     title = re.sub(r"\s+", " ", title).strip()
@@ -189,7 +191,7 @@ def moderation(title: str, filename: str, tags: list[str]) -> dict[str, object]:
     }
 
 
-def extract_tags(path: Path, category: str, media_kind: str, size: tuple[int, int] | None) -> list[str]:
+def extract_tags(path: Path, category: str, media_kind: str, size: tuple[int, int] | None, subcategory: str | None = None) -> list[str]:
     tags: list[str] = []
     tokens = clean_tokens(path)
     artist_match = ARTIST_RE.search(path.stem.lower())
@@ -215,6 +217,8 @@ def extract_tags(path: Path, category: str, media_kind: str, size: tuple[int, in
         tags.append("cartoon")
     elif category == "Memes":
         tags.append("meme")
+    if subcategory:
+        tags.extend(token for token in clean_tokens(Path(subcategory)) if token not in STOP_TAGS)
     if media_kind == "video":
         tags.append("video")
     if path.suffix.lower() == ".gif":
@@ -344,14 +348,14 @@ def main() -> int:
                         continue
                     mime_type, media_kind = detect_media(path)
                     size = image_size(path) if media_kind == "image" else video_size(path)
-                    category, subcategory = infer_category_pair(
+                    category, subcategory = canonical_category_pair(*infer_category_pair(
                         filename=path.name,
                         media_kind=media_kind,
                         title=build_title(path),
                         size=size,
-                    )
-                    title = build_title(path)
-                    tags = extract_tags(path, category, media_kind, size)
+                    ))
+                    title = build_title(path, category, subcategory)
+                    tags = extract_tags(path, category, media_kind, size, subcategory)
                     planned.append(
                         {
                             "path": path,
