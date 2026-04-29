@@ -56,10 +56,17 @@ class Settings:
     smtp_password: str
     smtp_from_email: str
     smtp_use_tls: bool
+    ai_enabled: bool
+    ai_api_key: str
+    ai_base_url: str
+    ai_model: str
+    ai_timeout_seconds: int
 
 
 def load_settings() -> Settings:
     pages_url = _env("GALLERY_PAGES_PUBLIC_URL", "https://darrylclay2005.github.io/Image-Gallery/")
+    ai_api_key = _env("GALLERY_AI_API_KEY") or _env("OPENAI_API_KEY")
+    ai_enabled_raw = _env("GALLERY_AI_ENABLED", "true" if ai_api_key else "false")
     return Settings(
         db_host=_db_host(),
         db_port=int(_env("GALLERY_DB_PORT", "3306")),
@@ -80,4 +87,9 @@ def load_settings() -> Settings:
         smtp_password=_env("GALLERY_SMTP_PASSWORD") or _env("SMTP_PASSWORD"),
         smtp_from_email=_env("GALLERY_SMTP_FROM_EMAIL") or _env("SMTP_FROM_EMAIL") or _env("GALLERY_SMTP_USERNAME") or _env("SMTP_USERNAME"),
         smtp_use_tls=(_env("GALLERY_SMTP_USE_TLS") or _env("SMTP_USE_TLS") or "true").lower() not in {"0", "false", "no", "off"},
+        ai_enabled=ai_enabled_raw.lower() not in {"0", "false", "no", "off"},
+        ai_api_key=ai_api_key,
+        ai_base_url=(_env("GALLERY_AI_BASE_URL") or _env("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/"),
+        ai_model=_env("GALLERY_AI_MODEL", "gpt-5.4-nano"),
+        ai_timeout_seconds=max(10, int(_env("GALLERY_AI_TIMEOUT_SECONDS", "45"))),
     )

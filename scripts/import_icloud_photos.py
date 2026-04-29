@@ -18,6 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.ai_metadata import analyze_media_path
 from app.classification import canonical_category_pair, infer_category_pair
 
 Image.MAX_IMAGE_PIXELS = None
@@ -298,6 +299,11 @@ def main() -> int:
     db_password = env_or_file("GALLERY_DB_PASSWORD", env_file, "")
     db_name = env_or_file("GALLERY_DB_SCHEMA", env_file, "image_gallery")
     source_dir = Path(args.folder).expanduser()
+    ai_enabled = env_or_file("GALLERY_AI_ENABLED", env_file, "false").lower() not in {"0", "false", "no", "off"}
+    ai_api_key = env_or_file("GALLERY_AI_API_KEY", env_file, env_or_file("OPENAI_API_KEY", env_file, ""))
+    ai_base_url = env_or_file("GALLERY_AI_BASE_URL", env_file, env_or_file("OPENAI_BASE_URL", env_file, "https://api.openai.com/v1")).rstrip("/")
+    ai_model = env_or_file("GALLERY_AI_MODEL", env_file, "gpt-5.4-nano")
+    ai_timeout_seconds = int(env_or_file("GALLERY_AI_TIMEOUT_SECONDS", env_file, "45"))
 
     if not source_dir.is_dir():
         raise SystemExit(f"Folder not found: {source_dir}")
@@ -347,26 +353,29 @@ def main() -> int:
                         skipped += 1
                         continue
                     mime_type, media_kind = detect_media(path)
-                    size = image_size(path) if media_kind == "image" else video_size(path)
-                    category, subcategory = canonical_category_pair(*infer_category_pair(
-                        filename=path.name,
+                    analysis = analyze_media_path(
+                        path,
+                        mime_type=mime_type,
                         media_kind=media_kind,
-                        title=build_title(path),
-                        size=size,
-                    ))
-                    title = build_title(path, category, subcategory)
-                    tags = extract_tags(path, category, media_kind, size, subcategory)
+                        ai_enabled=ai_enabled,
+                        ai_api_key=ai_api_key,
+                        ai_base_url=ai_base_url,
+                        ai_model=ai_model,
+                        ai_timeout_seconds=ai_timeout_seconds,
+                    )
+                    category, subcategory = canonical_category_pair(analysis.category_name, analysis.subcategory_name)
                     planned.append(
                         {
                             "path": path,
                             "sha": sha,
                             "mime_type": mime_type,
                             "media_kind": media_kind,
-                            "size": size,
                             "category": category,
                             "subcategory": subcategory,
-                            "title": title,
-                            "tags": tags,
+                            "title": analysis.title,
+                            "tags": list(analysis.tags),
+                            "stored_filename": analysis.suggested_filename[:255] if analysis.suggested_filename else path.name[:255],
+                            "source": analysis.source,
                         }
                     )
                 except Exception as exc:
@@ -404,8 +413,9 @@ def main() -> int:
                 subcategory_name = str(item.get("subcategory") or "").strip() or None
                 title = str(item["title"])
                 tags = list(item["tags"])
+                stored_filename = str(item.get("stored_filename") or path.name)[:255]
                 file_size = path.stat().st_size
-                moderation_bits = moderation(title, path.name, tags)
+                moderation_bits = moderation(title, stored_filename, tags)
                 category_id = ensure_category(cur, category_name, media_kind)
                 subcategory_id = ensure_subcategory(cur, category_id, subcategory_name)
 
@@ -419,7 +429,7 @@ def main() -> int:
                               (sha256, mime_type, original_filename, media_kind, file_size, content, created_by)
                             VALUES (%s, %s, %s, %s, %s, %s, %s)
                             """,
-                            (sha, mime_type[:120], path.name[:255], media_kind, file_size, b"", user_id),
+                            (sha, mime_type[:120], stored_filename, media_kind, file_size, b"", user_id),
                         )
                         media_file_id = int(cur.lastrowid)
                         existing_file_ids[sha] = media_file_id
@@ -455,7 +465,7 @@ def main() -> int:
                             json.dumps(tags),
                             media_kind,
                             mime_type[:120],
-                            path.name[:255],
+                            stored_filename,
                             f"db://media/{media_file_id}",
                             file_size,
                             media_file_id,
@@ -472,7 +482,7 @@ def main() -> int:
                     imported += 1
                     existing_media_shas.add(sha)
                     category_counts[category_name] += 1
-                    print(f"[{index}/{len(planned)}] imported {path.name} -> {category_name}")
+                    print(f"[{index}/{len(planned)}] imported {path.name} -> {category_name} ({item.get('source', 'heuristic')})")
                 except Exception as exc:
                     conn.rollback()
                     failed += 1

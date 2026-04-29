@@ -895,6 +895,40 @@ dialog[open] .modal-shell { animation: modalEnter 220ms ease-out both; }
   margin: -4px 0 0;
   overflow-wrap: anywhere;
 }
+.upload-ai-panel {
+  display: grid;
+  gap: 10px;
+}
+.upload-ai-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.upload-ai-actions small {
+  flex: 1 1 260px;
+}
+.upload-ai-preview {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+.upload-ai-preview > div {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+.upload-ai-preview strong,
+.upload-ai-preview span {
+  overflow-wrap: anywhere;
+}
+.upload-ai-preview span {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
 
 .detail-modal { width: min(1220px, calc(100vw - 24px)); }
 .detail-shell { width: 100%; }

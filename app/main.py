@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .ai_metadata import analyze_media_bytes, is_low_signal_filename
 from .auth import extract_bearer_token, issue_token, require_auth, verify_token
 from .config import ROOT_DIR, load_settings
 from .database import GalleryDatabase
@@ -394,6 +395,23 @@ def _parse_tags(value: str | None) -> list[str]:
         if tag and tag.lower() not in {existing.lower() for existing in tags}:
             tags.append(tag)
     return tags[:12]
+
+
+def _merge_upload_tags(primary: list[str], secondary: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for raw in list(primary) + list(secondary):
+        tag = re.sub(r"[^A-Za-z0-9_.-]+", "", str(raw or "").strip())[:32]
+        if not tag:
+            continue
+        lowered = tag.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        merged.append(tag)
+        if len(merged) >= 12:
+            break
+    return merged
 
 
 def _moderate_upload(
@@ -1085,7 +1103,7 @@ async def save_collection_item(collection_id: int, payload: CollectionItemReques
 async def upload_media(
     request: Request,
     file: UploadFile = File(...),
-    title: str = Form(...),
+    title: str = Form(""),
     description: str = Form(""),
     category_id: int | None = Form(None),
     subcategory_id: int | None = Form(None),
@@ -1098,36 +1116,59 @@ async def upload_media(
     comments_enabled: bool = Form(True),
     downloads_enabled: bool = Form(True),
     pinned: bool = Form(False),
+    auto_ai: bool = Form(True),
 ) -> dict[str, Any]:
     auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
     media_kind = _detect_media_kind(file)
     visibility = str(visibility or "public").lower()
     if visibility not in {"public", "unlisted", "private"}:
         raise HTTPException(status_code=400, detail="Visibility must be public, unlisted, or private.")
-    title = " ".join(title.strip().split())[:160]
+    _rate_limit(f"upload:{auth['id']}", limit=60, window_seconds=3600)
+    uploaded = await _read_validated_upload(file, settings.max_upload_bytes)
+    analysis = analyze_media_bytes(
+        content=uploaded["content"],
+        filename=uploaded["original_filename"],
+        mime_type=uploaded["mime_type"],
+        media_kind=uploaded["media_kind"],
+        title_hint=title,
+        description_hint=description,
+        tags_hint=_parse_tags(tags),
+        ai_enabled=auto_ai and settings.ai_enabled,
+        ai_api_key=settings.ai_api_key,
+        ai_base_url=settings.ai_base_url,
+        ai_model=settings.ai_model,
+        ai_timeout_seconds=settings.ai_timeout_seconds,
+    )
+    title = " ".join((title or analysis.title).strip().split())[:160]
     if not title:
         raise HTTPException(status_code=400, detail="Title is required.")
+    parsed_tags = _merge_upload_tags(_parse_tags(tags), analysis.tags)
+    chosen_category_name = " ".join(category_name.strip().split())[:80] or analysis.category_name or ""
+    chosen_subcategory_name = " ".join(subcategory_name.strip().split())[:80] or analysis.subcategory_name or ""
     if not category_id:
-        category = await db.create_category(category_name, category_kind, int(auth["id"]))
+        if not chosen_category_name:
+            raise HTTPException(status_code=400, detail="Category is required.")
+        inferred_kind = category_kind if category_kind in {"image", "video", "mixed"} else ("video" if uploaded["media_kind"] == "video" else "image")
+        category = await db.create_category(chosen_category_name, inferred_kind, int(auth["id"]))
         category_id = int(category["id"])
     category_id, subcategory_id = await db.resolve_category_ids(
         category_id=category_id,
         subcategory_id=subcategory_id,
-        subcategory_name=subcategory_name,
+        subcategory_name=chosen_subcategory_name,
         user_id=int(auth["id"]),
     )
-    parsed_tags = _parse_tags(tags)
-    original_filename = Path(file.filename or "upload").name[:255]
+    stored_filename = uploaded["original_filename"]
+    if analysis.suggested_filename and (auto_ai or is_low_signal_filename(stored_filename)):
+        if is_low_signal_filename(stored_filename) or not title.strip():
+            stored_filename = analysis.suggested_filename[:255]
     moderation = _moderate_upload(
         title=title,
         description=description.strip()[:2000] or None,
         tags=parsed_tags,
-        filename=original_filename,
-        mime_type=file.content_type or "application/octet-stream",
-        user_marked_adult=is_adult,
+        filename=stored_filename,
+        mime_type=uploaded["mime_type"],
+        user_marked_adult=bool(is_adult or analysis.is_adult),
     )
-    _rate_limit(f"upload:{auth['id']}", limit=60, window_seconds=3600)
-    uploaded = await _read_validated_upload(file, settings.max_upload_bytes)
     packet_limit = await db.get_max_allowed_packet()
     chunk_budget = int(getattr(db, "media_chunk_bytes", 8 * 1024 * 1024)) + (2 * 1024 * 1024)
     if packet_limit and chunk_budget > packet_limit:
@@ -1141,7 +1182,7 @@ async def upload_media(
         )
     media_kind = uploaded["media_kind"]
     try:
-        media_file = await db.save_media_file(user_id=int(auth["id"]), content=uploaded["content"], sha256=uploaded["sha256"], mime_type=uploaded["mime_type"], original_filename=uploaded["original_filename"], media_kind=uploaded["media_kind"])
+        media_file = await db.save_media_file(user_id=int(auth["id"]), content=uploaded["content"], sha256=uploaded["sha256"], mime_type=uploaded["mime_type"], original_filename=stored_filename, media_kind=uploaded["media_kind"])
     except Exception as exc:
         if "Packet sequence number wrong" in str(exc):
             try:
@@ -1162,7 +1203,7 @@ async def upload_media(
             "tags": parsed_tags,
             "media_kind": media_kind,
             "mime_type": uploaded["mime_type"],
-            "original_filename": uploaded["original_filename"],
+            "original_filename": stored_filename,
             "storage_path": f"db://media/{media_file['id']}",
             "media_file_id": int(media_file["id"]),
             "content_sha256": uploaded["sha256"],
@@ -1176,6 +1217,38 @@ async def upload_media(
     )
     adult_allowed = await _viewer_can_open_adult(request)
     return {"media": _with_urls(request, item, adult_allowed)}
+
+
+@app.post("/api/media/analyze")
+async def analyze_media_upload(
+    request: Request,
+    file: UploadFile = File(...),
+    title: str = Form(""),
+    description: str = Form(""),
+    tags: str = Form(""),
+) -> dict[str, Any]:
+    require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    uploaded = await _read_validated_upload(file, settings.max_upload_bytes)
+    analysis = analyze_media_bytes(
+        content=uploaded["content"],
+        filename=uploaded["original_filename"],
+        mime_type=uploaded["mime_type"],
+        media_kind=uploaded["media_kind"],
+        title_hint=title,
+        description_hint=description,
+        tags_hint=_parse_tags(tags),
+        ai_enabled=settings.ai_enabled,
+        ai_api_key=settings.ai_api_key,
+        ai_base_url=settings.ai_base_url,
+        ai_model=settings.ai_model,
+        ai_timeout_seconds=settings.ai_timeout_seconds,
+    )
+    return {
+        "analysis": analysis.to_dict(),
+        "media_kind": uploaded["media_kind"],
+        "mime_type": uploaded["mime_type"],
+        "original_filename": uploaded["original_filename"],
+    }
 
 
 @app.get("/api/media/{media_id}")

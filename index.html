@@ -660,6 +660,17 @@
         <span>Tags</span>
         <input id="upload-tags" name="tags" placeholder="neon, funny, anime, desktop" />
       </label>
+      <div class="upload-ai-panel">
+        <label class="check-card">
+          <input id="upload-auto-ai" type="checkbox" checked />
+          <span>Use AI metadata suggestions for titles, tags, categories, and filenames</span>
+        </label>
+        <div class="upload-ai-actions">
+          <button id="upload-analyze" type="button">Analyze First File</button>
+          <small id="upload-ai-status" class="muted">Select a file to preview AI suggestions. Multi-file uploads still get analyzed again during save.</small>
+        </div>
+        <div id="upload-ai-preview" class="upload-ai-preview" hidden></div>
+      </div>
       <label class="check-card">
         <input id="upload-adult" name="is_adult" type="checkbox" />
         <span>Mark this upload as 18+</span>

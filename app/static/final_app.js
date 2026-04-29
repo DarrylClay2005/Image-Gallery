@@ -57,6 +57,8 @@ let selectedReportMediaId = null;
 let registerMode = false;
 let uploadInFlight = false;
 let uploadStartedAt = 0;
+let uploadAiBusy = false;
+let uploadAiAnalysis = null;
 let activeProfileUsername = "";
 let galleryViewRestored = false;
 let toastTimer = 0;
@@ -556,6 +558,18 @@ function categoryDisplayFromItem(item) {
 
 function categoryById(id) {
   return categories.find((item) => String(item.id) === String(id));
+}
+
+function categoryByName(name) {
+  const target = String(name || "").trim().toLowerCase();
+  if (!target) return null;
+  return categories.find((item) => String(item.name || "").trim().toLowerCase() === target) || null;
+}
+
+function subcategoryByName(categoryId, name) {
+  const target = String(name || "").trim().toLowerCase();
+  if (!target) return null;
+  return (subcategoriesForCategory(categoryId) || []).find((item) => String(item.name || "").trim().toLowerCase() === target) || null;
 }
 
 function isLegacyLeafCategory(category) {
@@ -2905,7 +2919,13 @@ function closeUploadDialog() {
   setNotice("upload-error", "");
   const form = safeEl("upload-form");
   if (form) form.reset();
+  uploadAiBusy = false;
+  uploadAiAnalysis = null;
   setTextIfPresent("file-label", "Choose images, GIFs, or videos under 500MB each");
+  setTextIfPresent("upload-ai-status", "Select a file to preview AI suggestions. Multi-file uploads still get analyzed again during save.");
+  showIfPresent("upload-ai-preview", false);
+  if (safeEl("upload-ai-preview")) $("upload-ai-preview").innerHTML = "";
+  setDisabledIfPresent("upload-analyze", false);
   renderUploadQueue();
   resetUploadProgress();
   const dialog = safeEl("upload-dialog");
@@ -2949,6 +2969,108 @@ function titleFromFilename(filename) {
     .slice(0, 160);
 }
 
+function renderUploadAiPreview(analysis) {
+  const preview = safeEl("upload-ai-preview");
+  if (!preview || !analysis) return showIfPresent("upload-ai-preview", false);
+  preview.hidden = false;
+  preview.innerHTML = `
+    <div>
+      <strong>${escapeHtml(analysis.title || "Untitled suggestion")}</strong>
+      <span>${escapeHtml(categoryDisplayName(analysis.category_name, analysis.subcategory_name))}</span>
+    </div>
+    <div>
+      <strong>${escapeHtml(analysis.suggested_filename || "No rename")}</strong>
+      <span>${escapeHtml((analysis.tags || []).join(", ") || "No tags suggested")}</span>
+    </div>
+    <div>
+      <strong>${escapeHtml((analysis.source || "heuristic").toUpperCase())}</strong>
+      <span>${escapeHtml(`Confidence ${Math.round(Number(analysis.confidence || 0) * 100)}%${analysis.is_adult ? " · 18+" : ""}`)}</span>
+    </div>
+  `;
+}
+
+function applyUploadAnalysis(analysis) {
+  if (!analysis) return;
+  const files = Array.from(safeEl("upload-file")?.files || []);
+  const singleFile = files.length === 1;
+  if (singleFile && safeEl("upload-title")) $("upload-title").value = analysis.title || $("upload-title").value;
+  if (safeEl("upload-tags")) $("upload-tags").value = (analysis.tags || []).join(", ");
+  if (analysis.is_adult && safeEl("upload-adult")) $("upload-adult").checked = true;
+  const category = categoryByName(analysis.category_name);
+  if (category) {
+    if (safeEl("upload-category")) $("upload-category").value = String(category.id);
+    toggleNewCategory();
+    const subcategory = subcategoryByName(category.id, analysis.subcategory_name);
+    if (subcategory && safeEl("upload-subcategory")) {
+      $("upload-subcategory").value = String(subcategory.id);
+      if (safeEl("new-subcategory-name")) $("new-subcategory-name").value = "";
+    } else if (analysis.subcategory_name && safeEl("upload-subcategory")) {
+      $("upload-subcategory").value = "__new__";
+      if (safeEl("new-subcategory-name")) $("new-subcategory-name").value = analysis.subcategory_name;
+    } else {
+      if (safeEl("upload-subcategory")) $("upload-subcategory").value = "";
+      if (safeEl("new-subcategory-name")) $("new-subcategory-name").value = "";
+    }
+    toggleNewCategory();
+  } else {
+    if (safeEl("upload-category")) $("upload-category").value = "";
+    toggleNewCategory();
+    if (safeEl("new-category-name")) $("new-category-name").value = analysis.category_name || "";
+    if (safeEl("new-category-kind")) $("new-category-kind").value = analysis.media_kind === "video" ? "video" : "image";
+    if (safeEl("new-subcategory-name")) $("new-subcategory-name").value = analysis.subcategory_name || "";
+  }
+  renderUploadAiPreview(analysis);
+  setTextIfPresent(
+    "upload-ai-status",
+    `${analysis.source === "openai" ? "AI" : "Smart fallback"} suggested ${categoryDisplayName(analysis.category_name, analysis.subcategory_name)} and ${Math.max(0, (analysis.tags || []).length)} tag${(analysis.tags || []).length === 1 ? "" : "s"}.`,
+  );
+  checkUploadReadiness();
+}
+
+async function analyzeUploadSelection({ apply = true, silent = false } = {}) {
+  if (uploadAiBusy) return;
+  const files = Array.from(safeEl("upload-file")?.files || []);
+  if (!files.length) {
+    if (!silent) setTextIfPresent("upload-ai-status", "Choose a file first.");
+    return;
+  }
+  const file = files[0];
+  const body = new FormData();
+  body.set("file", file);
+  body.set("title", safeEl("upload-title")?.value || "");
+  body.set("description", safeEl("upload-description")?.value || "");
+  body.set("tags", safeEl("upload-tags")?.value || "");
+  uploadAiBusy = true;
+  setDisabledIfPresent("upload-analyze", true);
+  setTextIfPresent("upload-ai-status", `Analyzing ${file.name}...`);
+  try {
+    const data = await apiUpload("/api/media/analyze", body);
+    uploadAiAnalysis = {
+      ...(data.analysis || {}),
+      media_kind: data.media_kind,
+      mime_type: data.mime_type,
+      original_filename: data.original_filename,
+    };
+    if (apply) applyUploadAnalysis(uploadAiAnalysis);
+    else renderUploadAiPreview(uploadAiAnalysis);
+    if (!apply) {
+      setTextIfPresent(
+        "upload-ai-status",
+        `${uploadAiAnalysis.source === "openai" ? "AI" : "Smart fallback"} preview ready for ${file.name}.`,
+      );
+    }
+  } catch (err) {
+    uploadAiAnalysis = null;
+    showIfPresent("upload-ai-preview", false);
+    setTextIfPresent("upload-ai-status", err.message || "AI analysis failed.");
+    if (!silent) showToast(err.message || "AI analysis failed.", "error");
+  } finally {
+    uploadAiBusy = false;
+    setDisabledIfPresent("upload-analyze", false);
+    checkUploadReadiness();
+  }
+}
+
 function updateUploadFileSummary() {
   const files = Array.from(safeEl("upload-file")?.files || []);
   const file = files[0];
@@ -2957,6 +3079,15 @@ function updateUploadFileSummary() {
   setTextIfPresent("upload-file-summary", files.length ? `${files.length} queued · ${formatBytes(totalBytes)} total` : "No file selected.");
   const title = safeEl("upload-title");
   if (file && title && !title.value.trim()) title.value = titleFromFilename(file.name);
+  if (!files.length) {
+    uploadAiAnalysis = null;
+    showIfPresent("upload-ai-preview", false);
+    setTextIfPresent("upload-ai-status", "Select a file to preview AI suggestions. Multi-file uploads still get analyzed again during save.");
+  } else if (safeEl("upload-auto-ai")?.checked) {
+    analyzeUploadSelection({ apply: true, silent: true });
+  } else {
+    setTextIfPresent("upload-ai-status", "AI suggestions are off for now. You can still analyze the first file manually.");
+  }
   renderUploadQueue();
   checkUploadReadiness();
 }
@@ -3010,6 +3141,7 @@ async function submitUpload(event) {
     body.set("title", files.length === 1 ? $("upload-title").value : titleFromFilename(file.name));
     body.set("description", $("upload-description").value);
     body.set("tags", $("upload-tags").value);
+    body.set("auto_ai", safeEl("upload-auto-ai")?.checked ? "true" : "false");
     body.set("is_adult", $("upload-adult").checked ? "true" : "false");
     if ($("upload-visibility")) body.set("visibility", $("upload-visibility").value || "public");
     if ($("upload-comments-enabled")) body.set("comments_enabled", $("upload-comments-enabled").checked ? "true" : "false");
@@ -3182,7 +3314,7 @@ function checkUploadReadiness() {
     else if (!title && files.length === 1) message = "Add a title before uploading.";
   }
   setNotice("upload-error", message);
-  setDisabledIfPresent("upload-submit", Boolean(message) || uploadInFlight);
+  setDisabledIfPresent("upload-submit", Boolean(message) || uploadInFlight || uploadAiBusy);
 }
 
 function showKeyboardShortcuts() {
@@ -3412,6 +3544,11 @@ function bindEvents() {
   $("upload-open").addEventListener("click", () => currentUser ? $("upload-dialog").showModal() : $("auth-dialog").showModal());
   if ($("upload-close")) $("upload-close").addEventListener("click", closeUploadDialog);
   $("upload-form").addEventListener("submit", submitUpload);
+  on("upload-analyze", "click", () => analyzeUploadSelection({ apply: true, silent: false }));
+  on("upload-auto-ai", "change", (event) => {
+    if (event.target.checked) analyzeUploadSelection({ apply: true, silent: true });
+    else setTextIfPresent("upload-ai-status", "AI suggestions are off for now. You can still analyze the first file manually.");
+  });
   on("edit-media-close", "click", () => $("edit-media-dialog").close());
   on("edit-media-form", "submit", submitEditMedia);
   $("upload-category").addEventListener("change", toggleNewCategory);
