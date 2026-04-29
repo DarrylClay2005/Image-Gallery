@@ -9,6 +9,7 @@ CONFIG_FILE="${ROOT_DIR}/live-config.json"
 LOG_DIR="${ROOT_DIR}/.runtime"
 TUNNEL_LOG="${LOG_DIR}/cloudflared-service.log"
 UVICORN_LOG="${LOG_DIR}/uvicorn-service-fallback.log"
+INSTANCE_LOCK_FILE="${LOG_DIR}/live-manager.lock"
 AUTO_PUSH_CONFIG="${GALLERY_AUTO_PUSH_CONFIG:-1}"
 ALLOW_FALLBACK_BACKEND="${GALLERY_SERVICE_START_BACKEND_IF_MISSING:-1}"
 TUNNEL_PROVIDER="${GALLERY_TUNNEL_PROVIDER:-cloudflare}"
@@ -28,6 +29,55 @@ GLOBAL_FAILURE_COOLDOWN_SECONDS="${GALLERY_CLOUDFLARE_FAILURE_COOLDOWN_SECONDS:-
 GLOBAL_RATE_LIMIT_COOLDOWN_SECONDS="${GALLERY_CLOUDFLARE_RATE_LIMIT_COOLDOWN_SECONDS:-900}"
 
 mkdir -p "${BIN_DIR}" "${LOG_DIR}" "${GLOBAL_TUNNEL_STATE_DIR}"
+
+current_live_url() {
+  CONFIG_FILE_PATH="${CONFIG_FILE}" python3 <<'PY'
+import json
+import os
+from pathlib import Path
+
+config_path = Path(os.environ["CONFIG_FILE_PATH"])
+try:
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+except Exception:
+    print("")
+else:
+    print(str(payload.get("gallery_url") or "").strip())
+PY
+}
+
+acquire_instance_lock() {
+  exec {INSTANCE_LOCK_FD}> "${INSTANCE_LOCK_FILE}"
+  if flock -n "${INSTANCE_LOCK_FD}"; then
+    return 0
+  fi
+
+  local existing_url
+  existing_url="$(current_live_url)"
+  echo "Another Image Gallery live tunnel manager is already running."
+  if [[ -n "${existing_url}" ]]; then
+    echo "Current published live URL: ${existing_url}"
+  else
+    echo "Current published live URL is not available yet. Reuse the running service instead of starting a second tunnel manager."
+  fi
+  exit 0
+}
+
+release_instance_lock() {
+  if [[ -n "${INSTANCE_LOCK_FD:-}" ]]; then
+    flock -u "${INSTANCE_LOCK_FD}" || true
+    eval "exec ${INSTANCE_LOCK_FD}>&-"
+    INSTANCE_LOCK_FD=""
+  fi
+}
+
+flush_local_dns_cache() {
+  if command -v resolvectl >/dev/null 2>&1; then
+    resolvectl flush-caches >/dev/null 2>&1 || true
+  elif command -v systemd-resolve >/dev/null 2>&1; then
+    systemd-resolve --flush-caches >/dev/null 2>&1 || true
+  fi
+}
 
 local_urls_json() {
   PORT="${PORT}" python3 <<'PY'
@@ -236,6 +286,7 @@ release_global_tunnel_slot() {
 }
 
 cleanup() {
+  release_instance_lock
   release_global_tunnel_slot
   if [[ -n "${PUBLISHED_GALLERY_URL:-}" ]] && grep -Fq "\"gallery_url\": \"${PUBLISHED_GALLERY_URL}\"" "${CONFIG_FILE}" 2>/dev/null; then
     write_offline_config
@@ -249,6 +300,8 @@ cleanup() {
   fi
 }
 trap cleanup EXIT INT TERM
+
+acquire_instance_lock
 
 tunnel_retry_delay() {
   local attempt="$1"
@@ -332,6 +385,7 @@ announce_live_url() {
     return
   fi
   write_config "${gallery_url}"
+  flush_local_dns_cache
   PUBLISHED_GALLERY_URL="${gallery_url}"
   publish_config
   echo "Live backend URL: ${gallery_url}"

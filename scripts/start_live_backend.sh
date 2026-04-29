@@ -12,12 +12,62 @@ LOG_DIR="${ROOT_DIR}/.runtime"
 UVICORN_LOG="${LOG_DIR}/uvicorn.log"
 TUNNEL_LOG="${LOG_DIR}/cloudflared.log"
 PID_FILE="${LOG_DIR}/live_backend.pid"
+INSTANCE_LOCK_FILE="${LOG_DIR}/live-manager.lock"
 AUTO_PUSH_CONFIG="${GALLERY_AUTO_PUSH_CONFIG:-1}"
 TUNNEL_PROVIDER="${GALLERY_TUNNEL_PROVIDER:-auto}"
 TUNNEL_READY_ATTEMPTS="${GALLERY_TUNNEL_READY_ATTEMPTS:-180}"
 
 mkdir -p "${BIN_DIR}" "${LOG_DIR}"
 echo "$$" > "${PID_FILE}"
+
+current_live_url() {
+  CONFIG_FILE_PATH="${CONFIG_FILE}" python3 <<'PY'
+import json
+import os
+from pathlib import Path
+
+config_path = Path(os.environ["CONFIG_FILE_PATH"])
+try:
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+except Exception:
+    print("")
+else:
+    print(str(payload.get("gallery_url") or "").strip())
+PY
+}
+
+acquire_instance_lock() {
+  exec {INSTANCE_LOCK_FD}> "${INSTANCE_LOCK_FILE}"
+  if flock -n "${INSTANCE_LOCK_FD}"; then
+    return 0
+  fi
+
+  local existing_url
+  existing_url="$(current_live_url)"
+  echo "Another Image Gallery live tunnel manager is already running."
+  if [[ -n "${existing_url}" ]]; then
+    echo "Current published live URL: ${existing_url}"
+  else
+    echo "Current published live URL is not available yet. Reuse the running manager instead of starting a second tunnel."
+  fi
+  exit 0
+}
+
+release_instance_lock() {
+  if [[ -n "${INSTANCE_LOCK_FD:-}" ]]; then
+    flock -u "${INSTANCE_LOCK_FD}" || true
+    eval "exec ${INSTANCE_LOCK_FD}>&-"
+    INSTANCE_LOCK_FD=""
+  fi
+}
+
+flush_local_dns_cache() {
+  if command -v resolvectl >/dev/null 2>&1; then
+    resolvectl flush-caches >/dev/null 2>&1 || true
+  elif command -v systemd-resolve >/dev/null 2>&1; then
+    systemd-resolve --flush-caches >/dev/null 2>&1 || true
+  fi
+}
 
 local_urls_json() {
   PORT="${PORT}" python3 <<'PY'
@@ -196,6 +246,7 @@ cloudflared_bin() {
 publish_live_url() {
   local gallery_url="$1"
   write_config "${gallery_url}"
+  flush_local_dns_cache
   PUBLISHED_GALLERY_URL="${gallery_url}"
   publish_config
   echo
@@ -243,6 +294,7 @@ start_pinggy_tunnel() {
 }
 
 cleanup() {
+  release_instance_lock
   if [[ -n "${PUBLISHED_GALLERY_URL:-}" ]] && grep -Fq "\"gallery_url\": \"${PUBLISHED_GALLERY_URL}\"" "${CONFIG_FILE}" 2>/dev/null; then
     write_offline_config
     publish_config
@@ -256,6 +308,8 @@ cleanup() {
   fi
 }
 trap cleanup EXIT INT TERM
+
+acquire_instance_lock
 
 install_python_deps
 CLOUDFLARED="$(cloudflared_bin)"
