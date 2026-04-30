@@ -1010,9 +1010,10 @@ async def profile_page(username: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="User not found.")
     adult_allowed = await _viewer_can_open_adult(request)
     is_owner = viewer_id and int(viewer_id) == int(profile["id"])
-    show_uploads = bool(profile.get("show_recent_uploads") or is_owner)
-    show_collections = bool(profile.get("show_collections") or is_owner)
-    show_friends = bool(profile.get("show_friends") or is_owner)
+    user_settings = dict(profile.get("user_settings") or {})
+    show_uploads = bool(user_settings.get("profile_show_uploads", profile.get("show_recent_uploads", True)) or is_owner)
+    show_collections = bool(user_settings.get("profile_show_collections", profile.get("show_collections", True)) or is_owner)
+    show_friends = bool(user_settings.get("profile_show_friends", profile.get("show_friends", True)) or is_owner)
     media = await db.list_profile_media(int(profile["id"]), viewer_id=viewer_id, limit=36) if show_uploads else []
     collections = await db.list_user_collections(int(profile["id"]), viewer_id=viewer_id, limit=12) if show_collections else []
     friends = await db.list_friends(int(profile["id"]), viewer_id=viewer_id, limit=18) if show_friends else []

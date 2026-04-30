@@ -88,7 +88,7 @@ MEDIA_COLUMNS = (
 )
 MEDIA_CATEGORY_SELECT = (
     "c.name AS category_name, c.slug AS category_slug, "
-    "sc.id AS subcategory_id, sc.name AS subcategory_name, sc.slug AS subcategory_slug,"
+    "sc.name AS subcategory_name, sc.slug AS subcategory_slug,"
 )
 MEDIA_CATEGORY_JOIN = (
     "JOIN categories c ON c.id = m.category_id "
@@ -748,7 +748,7 @@ class GalleryDatabase:
             elif key == "accent_color":
                 settings[key] = self._clean_color(value)
             elif key == "items_per_page":
-                settings[key] = max(15, min(int(value or 15), 15))
+                settings[key] = max(15, min(int(value or 15), 60))
             else:
                 settings[key] = bool(value)
         async with self.pool.acquire() as conn:

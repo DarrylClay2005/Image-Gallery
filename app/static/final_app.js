@@ -518,6 +518,10 @@ function escapeHtml(value) {
   }[char]));
 }
 
+function safeUrl(value) {
+  return escapeHtml(String(value || "").trim());
+}
+
 function normalizeLocalUrls(values) {
   const seen = new Set();
   return (Array.isArray(values) ? values : [])
@@ -684,11 +688,12 @@ function renderPreview(item, size = "card") {
   const locked = isAdult && !canRevealAdult(item);
   const blur = isAdult && !revealed && !locked;
   const placeholderText = locked ? "18+ Verify Age" : "Click To Reveal";
+  const previewUrl = safeUrl(item.url);
   const body = locked
     ? `<div class="locked-preview"><strong>18+</strong><span>Verify age to view</span></div>`
     : item.media_kind === "video"
-      ? `<video src="${item.url}" ${userSettings().muted_previews ? "muted" : ""} ${userSettings().autoplay_previews ? "autoplay loop" : ""} playsinline preload="metadata"></video>`
-      : `<img src="${item.url}" alt="${escapeHtml(item.title)}" loading="${size === "card" ? "lazy" : "eager"}" />`;
+      ? `<video src="${previewUrl}" ${userSettings().muted_previews ? "muted" : ""} ${userSettings().autoplay_previews ? "autoplay loop" : ""} playsinline preload="metadata"></video>`
+      : `<img src="${previewUrl}" alt="${escapeHtml(item.title)}" loading="${size === "card" ? "lazy" : "eager"}" />`;
   return `
     <span class="${blur ? "adult-blur" : ""}">${body}</span>
     ${isAdult && !revealed ? `<span class="adult-overlay">${placeholderText}</span>` : ""}
@@ -703,7 +708,7 @@ function renderAvatar(id, user) {
   const el = $(id);
   const name = user?.display_name || user?.username || "IG";
   if (user?.avatar_url || user?.user_avatar_url) {
-    el.innerHTML = `<img src="${user.avatar_url || user.user_avatar_url}" alt="">`;
+    el.innerHTML = `<img src="${safeUrl(user.avatar_url || user.user_avatar_url)}" alt="">`;
   } else {
     el.textContent = name.slice(0, 2).toUpperCase();
   }
@@ -716,7 +721,7 @@ function renderButtonAvatar(id, user, fallbackLabel = "IG") {
   const name = user?.display_name || user?.username || fallbackLabel;
   const avatarUrl = user?.avatar_url || user?.user_avatar_url || "";
   if (avatarUrl) {
-    el.innerHTML = `<img src="${avatarUrl}" alt="">`;
+    el.innerHTML = `<img src="${safeUrl(avatarUrl)}" alt="">`;
   } else {
     el.textContent = name.slice(0, 2).toUpperCase();
   }
@@ -2019,8 +2024,8 @@ function renderSlideshowSlide() {
   slideshowIndex = Math.max(0, Math.min(slideshowIndex, items.length - 1));
   const item = items[slideshowIndex];
   stage.innerHTML = item.media_kind === "video"
-    ? `<video src="${item.url}" controls autoplay playsinline ${userSettings().muted_previews ? "muted" : ""}></video>`
-    : `<img src="${item.url}" alt="${escapeHtml(item.title)}" />`;
+    ? `<video src="${safeUrl(item.url)}" controls autoplay playsinline ${userSettings().muted_previews ? "muted" : ""}></video>`
+    : `<img src="${safeUrl(item.url)}" alt="${escapeHtml(item.title)}" />`;
   setTextIfPresent("slideshow-title", item.title || "Slideshow");
   setTextIfPresent("slideshow-meta", `${slideshowIndex + 1} of ${items.length} · ${categoryDisplayFromItem(item)} · ${formatBytes(item.file_size)}`);
 }
@@ -2101,7 +2106,7 @@ function renderMediaGrid() {
           <span class="media-kicker subtle">${escapeHtml(item.media_kind === "video" ? "Video" : "Image")}</span>
         </div>
         <div class="author-row media-card-head">
-          <button type="button" class="avatar tiny" style="border-color:${escapeHtml(item.profile_color || "#37c9a7")}" data-profile="${escapeHtml(item.username || "")}">${item.user_avatar_url ? `<img src="${item.user_avatar_url}" alt="">` : escapeHtml((item.display_name || item.username || "IG").slice(0, 2).toUpperCase())}</button>
+          <button type="button" class="avatar tiny" style="border-color:${escapeHtml(item.profile_color || "#37c9a7")}" data-profile="${escapeHtml(item.username || "")}">${item.user_avatar_url ? `<img src="${safeUrl(item.user_avatar_url)}" alt="">` : escapeHtml((item.display_name || item.username || "IG").slice(0, 2).toUpperCase())}</button>
           <div class="media-copy">
             <h2>${adultBadge(item)}${escapeHtml(item.title)}</h2>
             <p class="muted">by <button type="button" class="text-button" data-profile="${escapeHtml(item.username || "")}">${escapeHtml(item.display_name || item.username)}</button>${item.visibility && item.visibility !== "public" ? ` · ${escapeHtml(item.visibility)}` : ""}${item.pinned_at ? " · pinned" : ""}</p>
@@ -2152,13 +2157,13 @@ async function openDetail(id) {
   const item = activeDetail;
   $("detail-title").innerHTML = `${adultBadge(item)}${escapeHtml(item.title)}`;
   $("detail-media").innerHTML = item.media_kind === "video"
-    ? `<video src="${item.url}" controls autoplay playsinline></video>`
-    : `<img src="${item.url}" alt="${escapeHtml(item.title)}" />`;
+    ? `<video src="${safeUrl(item.url)}" controls autoplay playsinline></video>`
+    : `<img src="${safeUrl(item.url)}" alt="${escapeHtml(item.title)}" />`;
   resetDetailTransform();
   $("detail-meta").textContent = `${categoryDisplayFromItem(item)} by ${item.display_name || item.username} - ${formatBytes(item.file_size)} - ${item.like_count || 0} likes`;
   renderDetailInspector(item);
   $("detail-description").innerHTML = `
-    ${item.user_avatar_url ? `<div class="profile-mini"><button type="button" class="avatar" data-profile="${escapeHtml(item.username || "")}"><img src="${item.user_avatar_url}" alt=""></button><div><button type="button" class="text-button strong" data-profile="${escapeHtml(item.username || "")}">${escapeHtml(item.display_name || item.username)}</button>${item.user_bio ? `<p>${escapeHtml(item.user_bio)}</p>` : ""}${item.user_website_url ? `<a href="${item.user_website_url}" target="_blank" rel="noopener">Website</a>` : ""}</div></div>` : ""}
+    ${item.user_avatar_url ? `<div class="profile-mini"><button type="button" class="avatar" data-profile="${escapeHtml(item.username || "")}"><img src="${safeUrl(item.user_avatar_url)}" alt=""></button><div><button type="button" class="text-button strong" data-profile="${escapeHtml(item.username || "")}">${escapeHtml(item.display_name || item.username)}</button>${item.user_bio ? `<p>${escapeHtml(item.user_bio)}</p>` : ""}${item.user_website_url ? `<a href="${safeUrl(item.user_website_url)}" target="_blank" rel="noopener">Website</a>` : ""}</div></div>` : ""}
     <p>${escapeHtml(item.description || "")}</p>
   `;
   $("detail-tags").innerHTML = (item.tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
@@ -2199,7 +2204,7 @@ function renderComments(comments) {
     return `
       <div class="comment">
         <div class="comment-head">
-          <div class="avatar tiny">${avatarUrl ? `<img src="${avatarUrl}" alt="">` : escapeHtml((comment.display_name || comment.username || "IG").slice(0, 2).toUpperCase())}</div>
+          <div class="avatar tiny">${avatarUrl ? `<img src="${safeUrl(avatarUrl)}" alt="">` : escapeHtml((comment.display_name || comment.username || "IG").slice(0, 2).toUpperCase())}</div>
           <strong>${escapeHtml(comment.display_name || comment.username)}</strong>
           ${canDelete ? `<button type="button" class="comment-delete" data-delete-comment="${comment.id}">Delete</button>` : ""}
         </div>
@@ -2271,7 +2276,7 @@ function collectionCardMarkup(collection) {
   return `
     <article class="collection-card">
       <button type="button" data-collection-open="${collection.id}" class="collection-cover">
-        ${collection.cover_url ? `<img src="${collection.cover_url}" alt="">` : `<span>${collection.cover_locked ? "18+" : escapeHtml(collection.name.slice(0, 2).toUpperCase())}</span>`}
+        ${collection.cover_url ? `<img src="${safeUrl(collection.cover_url)}" alt="">` : `<span>${collection.cover_locked ? "18+" : escapeHtml(collection.name.slice(0, 2).toUpperCase())}</span>`}
       </button>
       <div>
         <h3>${escapeHtml(collection.name)}</h3>
@@ -2578,7 +2583,7 @@ function friendButtonLabel(status) {
 
 function userCard(user, { compact = false } = {}) {
   const avatar = user.avatar_url
-    ? `<img src="${user.avatar_url}" alt="">`
+    ? `<img src="${safeUrl(user.avatar_url)}" alt="">`
     : escapeHtml((user.display_name || user.username || "IG").slice(0, 2).toUpperCase());
   return `
     <article class="user-card">
@@ -2824,7 +2829,7 @@ function renderProfile(data) {
   const heroRibbonMarkup = heroRibbonItems.length ? `<div class="profile-ribbon">${heroRibbonItems.join("")}</div>` : "";
   const compactMarkup = `
     <section class="profile-hero" style="--profile-accent:${escapeHtml(user.profile_color || "#37c9a7")}">
-      <div class="avatar large">${user.avatar_url ? `<img src="${user.avatar_url}" alt="">` : escapeHtml((user.display_name || user.username || "IG").slice(0, 2).toUpperCase())}</div>
+      <div class="avatar large">${user.avatar_url ? `<img src="${safeUrl(user.avatar_url)}" alt="">` : escapeHtml((user.display_name || user.username || "IG").slice(0, 2).toUpperCase())}</div>
       <div>
         <h2>${escapeHtml(user.display_name || user.username)}</h2>
         <p class="muted">@${escapeHtml(user.username || "")}${user.location_label ? ` · ${escapeHtml(user.location_label)}` : ""}</p>
@@ -2914,7 +2919,7 @@ function renderProfile(data) {
   const expandedMarkup = `
     <div class="profile-showcase profile-layout-${escapeHtml(prefs.profile_layout || "spotlight")} profile-card-style-${escapeHtml(prefs.profile_card_style || "glass")}" data-banner-style="${escapeHtml(prefs.profile_banner_style || "gradient")}" data-hero-align="${escapeHtml(prefs.profile_hero_alignment || "split")}" style="--profile-accent:${escapeHtml(user.profile_color || "#37c9a7")}">
       <div class="profile-showcase-top">
-        <div class="avatar large">${user.avatar_url ? `<img src="${user.avatar_url}" alt="">` : escapeHtml((user.display_name || user.username || "IG").slice(0, 2).toUpperCase())}</div>
+        <div class="avatar large">${user.avatar_url ? `<img src="${safeUrl(user.avatar_url)}" alt="">` : escapeHtml((user.display_name || user.username || "IG").slice(0, 2).toUpperCase())}</div>
         <div class="profile-showcase-copy">
           <p class="page-eyebrow">Profile</p>
           <h2>${escapeHtml(user.display_name || user.username)}</h2>
