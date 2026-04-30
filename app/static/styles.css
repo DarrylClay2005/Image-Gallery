@@ -12,6 +12,7 @@
   --accent-2: #e0b34b;
   --danger: #ff6b6b;
   --shadow: 0 20px 80px rgba(0, 0, 0, 0.32);
+  --site-background-image: none;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
@@ -109,12 +110,43 @@ body[data-blur-videos="1"] .media-preview video { filter: blur(6px); }
 html, body { max-width: 100%; overflow-x: hidden; }
 body {
   margin: 0;
-  background:
-    linear-gradient(135deg, rgba(55, 201, 167, 0.1), transparent 36%),
-    linear-gradient(315deg, rgba(224, 179, 75, 0.08), transparent 34%),
-    var(--bg);
+  position: relative;
+  isolation: isolate;
+  background: var(--bg);
   color: var(--text);
   min-height: 100vh;
+}
+
+body::before,
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+
+body::before {
+  z-index: -2;
+  opacity: 0;
+  background-image: var(--site-background-image);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  filter: saturate(1.05) contrast(1.04) brightness(0.58);
+  transform: scale(1.03);
+  transition: opacity 900ms ease, filter 900ms ease;
+}
+
+body[data-background-ready="1"]::before {
+  opacity: 1;
+}
+
+body::after {
+  z-index: -1;
+  background:
+    linear-gradient(180deg, rgba(7, 11, 16, 0.48), rgba(7, 11, 16, 0.78)),
+    linear-gradient(135deg, rgba(55, 201, 167, 0.12), transparent 36%),
+    linear-gradient(315deg, rgba(224, 179, 75, 0.1), transparent 34%);
 }
 
 button, input, select, textarea, .button-link {
@@ -1706,11 +1738,51 @@ dialog.insights-modal .modal-shell.wide {
   border-color: transparent;
 }
 
+.profile-showcase[data-banner-style="aurora"] {
+  background:
+    radial-gradient(circle at 12% 18%, color-mix(in srgb, var(--profile-accent, var(--accent)) 44%, transparent), transparent 28%),
+    radial-gradient(circle at 84% 16%, color-mix(in srgb, var(--accent-2) 32%, transparent), transparent 24%),
+    radial-gradient(circle at 48% 78%, rgba(129, 214, 255, 0.22), transparent 26%),
+    linear-gradient(145deg, rgba(18, 24, 31, 0.97), rgba(10, 16, 22, 0.98));
+}
+
+.profile-showcase[data-banner-style="spotlight"] {
+  background:
+    radial-gradient(circle at 82% 22%, color-mix(in srgb, var(--profile-accent, var(--accent)) 44%, transparent), transparent 22%),
+    radial-gradient(circle at 18% 80%, rgba(255, 255, 255, 0.08), transparent 18%),
+    linear-gradient(180deg, rgba(23, 29, 37, 0.96), rgba(12, 16, 22, 0.98));
+}
+
+.profile-showcase[data-banner-style="poster"] {
+  background:
+    linear-gradient(115deg, rgba(255, 255, 255, 0.06) 0 12%, transparent 12% 22%, rgba(255, 255, 255, 0.04) 22% 30%, transparent 30% 100%),
+    linear-gradient(135deg, color-mix(in srgb, var(--profile-accent, var(--accent)) 18%, rgba(19, 24, 31, 0.96)), rgba(11, 16, 21, 0.98));
+}
+
 .profile-showcase-top {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 18px;
   align-items: center;
+}
+
+.profile-showcase[data-hero-align="start"] .profile-showcase-top {
+  align-items: start;
+}
+
+.profile-showcase[data-hero-align="start"] .profile-actions {
+  justify-content: flex-start;
+}
+
+.profile-showcase[data-hero-align="center"] .profile-showcase-top {
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: center;
+  text-align: center;
+}
+
+.profile-showcase[data-hero-align="center"] .profile-ribbon,
+.profile-showcase[data-hero-align="center"] .profile-actions {
+  justify-content: center;
 }
 
 .profile-showcase-copy {
@@ -1772,6 +1844,46 @@ dialog.insights-modal .modal-shell.wide {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
 
+.profile-spotlight-grid[data-stat-style="ribbon"] {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.profile-spotlight-grid[data-stat-style="ribbon"] .profile-insight-card {
+  border-radius: 999px;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 14px 16px;
+}
+
+.profile-spotlight-grid[data-stat-style="ribbon"] .profile-insight-card h3,
+.profile-spotlight-grid[data-stat-style="ribbon"] .profile-insight-card .muted {
+  margin: 0;
+}
+
+.profile-spotlight-grid[data-stat-style="ribbon"] .profile-insight-card strong {
+  font-size: 1.5rem;
+}
+
+.profile-spotlight-grid[data-stat-style="minimal"] {
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 18px;
+}
+
+.profile-spotlight-grid[data-stat-style="minimal"] .profile-insight-card {
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
+  border-width: 0 1px 0 0;
+  padding: 0 16px 0 0;
+}
+
+.profile-spotlight-grid[data-stat-style="minimal"] .profile-insight-card:last-child {
+  border-right: 0;
+  padding-right: 0;
+}
+
 .profile-insight-card,
 .profile-section-card,
 .sidebar-note {
@@ -1804,9 +1916,61 @@ dialog.insights-modal .modal-shell.wide {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.profile-showcase.profile-layout-split .profile-showcase-top {
+  grid-template-columns: auto minmax(0, 1.4fr) minmax(240px, 0.8fr);
+}
+
+.profile-dashboard.profile-layout-split {
+  grid-template-columns: minmax(0, 1.45fr) minmax(300px, 0.55fr);
+}
+
+.profile-dashboard.profile-layout-mosaic {
+  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+}
+
+.profile-layout-mosaic .profile-spotlight-grid {
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+}
+
+.profile-layout-mosaic .profile-spotlight-grid .profile-insight-card {
+  grid-column: span 3;
+}
+
+.profile-layout-mosaic .profile-spotlight-grid .profile-insight-card:first-child,
+.profile-layout-mosaic .profile-spotlight-grid .profile-insight-card:nth-child(2) {
+  grid-column: span 6;
+}
+
+.profile-dashboard.profile-layout-timeline {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.profile-dashboard.profile-layout-timeline .profile-column,
+.profile-dashboard.profile-layout-timeline .profile-rail {
+  gap: 16px;
+}
+
+.profile-dashboard.profile-layout-timeline .profile-section-card {
+  position: relative;
+  border-left-width: 4px;
+  border-left-color: color-mix(in srgb, var(--profile-accent, var(--accent)) 58%, var(--line));
+}
+
 .profile-layout-stack .profile-showcase-top,
 .profile-dashboard.profile-layout-stack {
   grid-template-columns: minmax(0, 1fr);
+}
+
+.profile-dashboard.profile-focus-gallery {
+  grid-template-columns: minmax(0, 1.55fr) minmax(260px, 0.45fr);
+}
+
+.profile-dashboard.profile-focus-collections {
+  grid-template-columns: minmax(0, 1.2fr) minmax(300px, 0.8fr);
+}
+
+.profile-dashboard.profile-focus-social {
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.9fr);
 }
 
 .profile-card-style-solid .profile-insight-card,
@@ -1818,6 +1982,25 @@ dialog.insights-modal .modal-shell.wide {
 .profile-card-style-outline .profile-section-card {
   background: transparent;
   box-shadow: none;
+}
+
+.profile-card-style-elevated .profile-insight-card,
+.profile-card-style-elevated .profile-section-card {
+  background: linear-gradient(180deg, rgba(28, 35, 44, 0.98), rgba(16, 20, 26, 0.98));
+  box-shadow: 0 26px 68px rgba(0, 0, 0, 0.34);
+}
+
+.profile-card-style-soft .profile-insight-card,
+.profile-card-style-soft .profile-section-card {
+  background: color-mix(in srgb, var(--panel) 86%, rgba(255, 255, 255, 0.06));
+  border-color: color-mix(in srgb, var(--profile-accent, var(--accent)) 22%, var(--line));
+}
+
+.profile-card-style-edge .profile-insight-card,
+.profile-card-style-edge .profile-section-card {
+  border-left-width: 4px;
+  border-left-color: color-mix(in srgb, var(--profile-accent, var(--accent)) 62%, var(--line));
+  background: linear-gradient(180deg, rgba(24, 29, 36, 0.96), rgba(18, 22, 28, 0.98));
 }
 
 .sidebar-note h3,

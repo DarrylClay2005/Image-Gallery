@@ -7,6 +7,8 @@ import re
 import secrets
 import hashlib
 import hmac
+import random
+import struct
 import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime
@@ -42,6 +44,11 @@ ADULT_KEYWORDS = {
     "erotic", "fetish", "onlyfans", "camgirl", "cam boy", "xxx",
 }
 SITE_OWNER_EMAIL = "heavenlyxenusvr@icloud.com"
+BACKGROUND_ASPECT_RATIO = 16 / 9
+BACKGROUND_ASPECT_TOLERANCE = 0.035
+BACKGROUND_CACHE_SECONDS = 300
+_background_cache_lock = asyncio.Lock()
+_background_cache: dict[str, Any] = {"built_at": 0.0, "items": []}
 
 
 class RegisterRequest(BaseModel):
@@ -140,6 +147,9 @@ class SettingsUpdateRequest(BaseModel):
     profile_layout: str | None = None
     profile_banner_style: str | None = None
     profile_card_style: str | None = None
+    profile_stat_style: str | None = None
+    profile_content_focus: str | None = None
+    profile_hero_alignment: str | None = None
     autoplay_previews: bool | None = None
     muted_previews: bool | None = None
     reduce_motion: bool | None = None
@@ -268,6 +278,122 @@ def _legacy_upload_path(storage_path: str | None) -> Path | None:
     except ValueError:
         return None
     return path if path.is_file() else None
+
+
+def _is_widescreen_background(width: int, height: int) -> bool:
+    if width <= 0 or height <= 0 or width < height:
+        return False
+    return abs((width / height) - BACKGROUND_ASPECT_RATIO) <= BACKGROUND_ASPECT_TOLERANCE
+
+
+def _background_dimensions_from_bytes(content: bytes) -> tuple[int, int] | None:
+    if content.startswith(b"\x89PNG\r\n\x1a\n") and len(content) >= 24:
+        width, height = struct.unpack(">II", content[16:24])
+        return int(width), int(height)
+    if content.startswith((b"GIF87a", b"GIF89a")) and len(content) >= 10:
+        width, height = struct.unpack("<HH", content[6:10])
+        return int(width), int(height)
+    if content.startswith(b"BM") and len(content) >= 26:
+        width, height = struct.unpack("<ii", content[18:26])
+        return abs(int(width)), abs(int(height))
+    if content.startswith(b"RIFF") and content[8:12] == b"WEBP" and len(content) >= 30:
+        chunk = content[12:16]
+        if chunk == b"VP8X" and len(content) >= 30:
+            width = 1 + int.from_bytes(content[24:27], "little")
+            height = 1 + int.from_bytes(content[27:30], "little")
+            return width, height
+        if chunk == b"VP8 " and len(content) >= 30:
+            start = content.find(b"\x9d\x01\x2a")
+            if start != -1 and len(content) >= start + 7:
+                width, height = struct.unpack("<HH", content[start + 3:start + 7])
+                return int(width & 0x3FFF), int(height & 0x3FFF)
+        if chunk == b"VP8L" and len(content) >= 25:
+            bits = int.from_bytes(content[21:25], "little")
+            width = (bits & 0x3FFF) + 1
+            height = ((bits >> 14) & 0x3FFF) + 1
+            return width, height
+    if content.startswith(b"\xff\xd8"):
+        offset = 2
+        while offset + 9 < len(content):
+            while offset < len(content) and content[offset] != 0xFF:
+                offset += 1
+            while offset < len(content) and content[offset] == 0xFF:
+                offset += 1
+            if offset >= len(content):
+                break
+            marker = content[offset]
+            offset += 1
+            if marker in {0xD8, 0xD9} or 0xD0 <= marker <= 0xD7:
+                continue
+            if offset + 2 > len(content):
+                break
+            segment_length = struct.unpack(">H", content[offset:offset + 2])[0]
+            if segment_length < 2 or offset + segment_length > len(content):
+                break
+            if marker in {
+                0xC0, 0xC1, 0xC2, 0xC3,
+                0xC5, 0xC6, 0xC7,
+                0xC9, 0xCA, 0xCB,
+                0xCD, 0xCE, 0xCF,
+            } and offset + 7 <= len(content):
+                height, width = struct.unpack(">HH", content[offset + 3:offset + 7])
+                return int(width), int(height)
+            offset += segment_length
+    return None
+
+
+def _background_dimensions_from_path(path: Path) -> tuple[int, int] | None:
+    try:
+        return _background_dimensions_from_bytes(path.read_bytes())
+    except OSError:
+        return None
+
+
+async def _background_candidate_rows() -> list[dict[str, Any]]:
+    now = time.time()
+    cached_items = _background_cache.get("items") or []
+    built_at = float(_background_cache.get("built_at") or 0.0)
+    if cached_items and (now - built_at) < BACKGROUND_CACHE_SECONDS:
+        return cached_items
+    async with _background_cache_lock:
+        cached_items = _background_cache.get("items") or []
+        built_at = float(_background_cache.get("built_at") or 0.0)
+        if cached_items and (time.time() - built_at) < BACKGROUND_CACHE_SECONDS:
+            return cached_items
+        rows = await db.list_public_background_candidates(limit=900)
+        eligible: list[dict[str, Any]] = []
+        for row in rows:
+            if row.get("mime_type") and not str(row["mime_type"]).startswith("image/"):
+                continue
+            media_id = int(row["id"])
+            file_row = await db.get_media_file(media_id)
+            if file_row and file_row.get("content"):
+                dimensions = _background_dimensions_from_bytes(file_row["content"])
+            else:
+                legacy = _legacy_upload_path(row.get("storage_path"))
+                dimensions = _background_dimensions_from_path(legacy) if legacy and legacy.exists() else None
+            if not dimensions:
+                continue
+            width, height = dimensions
+            if not _is_widescreen_background(width, height):
+                continue
+            eligible.append(
+                {
+                    "id": media_id,
+                    "title": row.get("title") or row.get("original_filename") or f"Background {media_id}",
+                    "username": row.get("username"),
+                    "display_name": row.get("display_name") or row.get("username"),
+                    "category_name": row.get("category_name"),
+                    "subcategory_name": row.get("subcategory_name"),
+                    "width": width,
+                    "height": height,
+                }
+            )
+            if len(eligible) >= 180:
+                break
+        _background_cache["built_at"] = time.time()
+        _background_cache["items"] = eligible
+        return eligible
 
 
 def _fallback_avatar_svg(user_id: int) -> str:
@@ -1047,6 +1173,22 @@ async def random_media(request: Request) -> dict[str, Any]:
     if not item:
         raise HTTPException(status_code=404, detail="No media has been uploaded yet.")
     return {"media": _with_urls(request, item, adult_allowed)}
+
+
+@app.get("/api/site/background")
+async def site_background(request: Request, exclude: int | None = None) -> dict[str, Any]:
+    candidates = await _background_candidate_rows()
+    if not candidates:
+        raise HTTPException(status_code=404, detail="No 16:9 public images are available for the site background.")
+    pool = [item for item in candidates if int(item["id"]) != int(exclude or 0)] or candidates
+    picked = random.choice(pool)
+    return {
+        "background": {
+            **picked,
+            "url": str(request.url_for("serve_media_file", media_id=int(picked["id"]))),
+        },
+        "refresh_after_seconds": BACKGROUND_CACHE_SECONDS,
+    }
 
 
 @app.get("/api/tags")

@@ -3,6 +3,7 @@ const REMOTE_MODE = window.location.hostname.endsWith("github.io");
 const CONFIG_FILE = "live-config.json";
 const TOKEN_KEY = "image_gallery_token";
 const USER_KEY = "image_gallery_user";
+const SITE_BACKGROUND_KEY = "image_gallery_site_background";
 const REMOTE_ORIGIN_KEY = "image_gallery_remote_origin";
 const GALLERY_VIEW_KEY = "image_gallery_view";
 const SAVED_VIEWS_KEY = "image_gallery_saved_views";
@@ -10,6 +11,7 @@ const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
 const GALLERY_PAGE_SIZE = 15;
 const COMPARE_SELECTION_LIMIT = 4;
 const LIVE_CHECK_INTERVAL_MS = 15000;
+const SITE_BACKGROUND_REFRESH_MS = 5 * 60 * 1000;
 const SEARCH_DEBOUNCE_MS = 250;
 const DEFAULT_USER_SETTINGS = {
   theme_mode: "system",
@@ -29,6 +31,9 @@ const DEFAULT_USER_SETTINGS = {
   profile_layout: "spotlight",
   profile_banner_style: "gradient",
   profile_card_style: "glass",
+  profile_stat_style: "tiles",
+  profile_content_focus: "balanced",
+  profile_hero_alignment: "split",
   profile_show_joined_date: true,
 };
 const ACCOUNT_NAVIGATION = {
@@ -79,6 +84,7 @@ let profilePageData = null;
 let profileCustomizeOpen = false;
 let friendPanelState = { incoming: [], outgoing: [], friends: [] };
 let studioPageState = { items: [], totals: { views: 0, downloads: 0, likes: 0 } };
+let siteBackgroundTimer = 0;
 
 const $ = (id) => document.getElementById(id);
 
@@ -667,6 +673,47 @@ function applyAccountSettings() {
   if (currentUser && $("sort-filter").value === "new") $("sort-filter").value = prefs.default_sort || "new";
 }
 
+function applySiteBackground(background, { persist = true } = {}) {
+  if (!background?.url) return;
+  const withBust = `${background.url}${background.url.includes("?") ? "&" : "?"}bg=${background.id || Date.now()}`;
+  const preload = new Image();
+  preload.decoding = "async";
+  preload.onload = () => {
+    document.documentElement.style.setProperty("--site-background-image", `url("${withBust}")`);
+    document.body.dataset.backgroundReady = "1";
+    const payload = { ...background, appliedAt: Date.now() };
+    if (persist) writeStore(SITE_BACKGROUND_KEY, JSON.stringify(payload));
+  };
+  preload.src = withBust;
+}
+
+function scheduleSiteBackgroundRefresh(delay = SITE_BACKGROUND_REFRESH_MS) {
+  clearTimeout(siteBackgroundTimer);
+  siteBackgroundTimer = window.setTimeout(() => {
+    refreshSiteBackground({ force: true });
+  }, Math.max(1000, delay));
+}
+
+async function refreshSiteBackground({ force = false } = {}) {
+  const cached = readJsonStore(SITE_BACKGROUND_KEY);
+  const cachedAge = Date.now() - Number(cached?.appliedAt || 0);
+  if (!force && cached?.url && cachedAge < SITE_BACKGROUND_REFRESH_MS) {
+    applySiteBackground(cached, { persist: false });
+    scheduleSiteBackgroundRefresh(SITE_BACKGROUND_REFRESH_MS - cachedAge);
+    return;
+  }
+  const excludeId = Number(cached?.id || 0) || 0;
+  try {
+    const data = await apiFetch(`/api/site/background${excludeId ? `?exclude=${excludeId}` : ""}`);
+    if (data?.background?.url) {
+      applySiteBackground(data.background);
+      scheduleSiteBackgroundRefresh((Number(data.refresh_after_seconds) || 300) * 1000);
+      return;
+    }
+  } catch (_err) {}
+  scheduleSiteBackgroundRefresh();
+}
+
 function galleryHeadingMeta() {
   if (currentPage === "following" || galleryMode === "following") {
     return {
@@ -902,12 +949,16 @@ function fillSettingsForm() {
   setValue("pref-profile-layout", prefs.profile_layout || "spotlight");
   setValue("pref-profile-banner-style", prefs.profile_banner_style || "gradient");
   setValue("pref-profile-card-style", prefs.profile_card_style || "glass");
+  setValue("pref-profile-stat-style", prefs.profile_stat_style || "tiles");
+  setValue("pref-profile-content-focus", prefs.profile_content_focus || "balanced");
+  setValue("pref-profile-hero-alignment", prefs.profile_hero_alignment || "split");
   setChecked("pref-autoplay-previews", prefs.autoplay_previews);
   setChecked("pref-muted-previews", prefs.muted_previews !== false);
   setChecked("pref-reduce-motion", prefs.reduce_motion);
   setChecked("pref-open-original", prefs.open_original_in_new_tab);
   setChecked("pref-blur-video-previews", prefs.blur_video_previews);
   setChecked("pref-profile-show-joined-date", prefs.profile_show_joined_date !== false);
+  setChecked("pref-profile-show-follow-counts", prefs.profile_show_follow_counts !== false);
   setTextIfPresent("settings-email-status", currentUser.email ? (currentUser.email_verified ? "Email verified" : "Email verification pending") : "No email set");
   setTextIfPresent("settings-age-status", currentUser.age_verified ? "Verified" : "Not verified");
   const preview = safeEl("settings-avatar-preview");
@@ -953,6 +1004,9 @@ async function submitSettings(event) {
       profile_layout: $("pref-profile-layout").value,
       profile_banner_style: $("pref-profile-banner-style").value,
       profile_card_style: $("pref-profile-card-style").value,
+      profile_stat_style: $("pref-profile-stat-style").value,
+      profile_content_focus: $("pref-profile-content-focus").value,
+      profile_hero_alignment: $("pref-profile-hero-alignment").value,
       autoplay_previews: $("pref-autoplay-previews").checked,
       muted_previews: $("pref-muted-previews").checked,
       reduce_motion: $("pref-reduce-motion").checked,
@@ -962,7 +1016,7 @@ async function submitSettings(event) {
       profile_show_uploads: $("settings-show-uploads").checked,
       profile_show_collections: $("settings-show-collections").checked,
       profile_show_friends: $("settings-show-friends").checked,
-      profile_show_follow_counts: $("settings-show-liked-count").checked,
+      profile_show_follow_counts: $("pref-profile-show-follow-counts").checked,
     };
     data = await apiFetch("/api/me/settings", {
       method: "PATCH",
@@ -2569,6 +2623,26 @@ function profileCustomizationMarkup(user) {
               <option value="spotlight" ${prefs.profile_layout === "spotlight" ? "selected" : ""}>Spotlight</option>
               <option value="magazine" ${prefs.profile_layout === "magazine" ? "selected" : ""}>Magazine</option>
               <option value="stack" ${prefs.profile_layout === "stack" ? "selected" : ""}>Stacked</option>
+              <option value="split" ${prefs.profile_layout === "split" ? "selected" : ""}>Split Screen</option>
+              <option value="mosaic" ${prefs.profile_layout === "mosaic" ? "selected" : ""}>Mosaic</option>
+              <option value="timeline" ${prefs.profile_layout === "timeline" ? "selected" : ""}>Timeline</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Header alignment</span>
+            <select id="profile-page-hero-alignment">
+              <option value="split" ${prefs.profile_hero_alignment === "split" ? "selected" : ""}>Split</option>
+              <option value="start" ${prefs.profile_hero_alignment === "start" ? "selected" : ""}>Left aligned</option>
+              <option value="center" ${prefs.profile_hero_alignment === "center" ? "selected" : ""}>Centered</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Content focus</span>
+            <select id="profile-page-content-focus">
+              <option value="balanced" ${prefs.profile_content_focus === "balanced" ? "selected" : ""}>Balanced</option>
+              <option value="gallery" ${prefs.profile_content_focus === "gallery" ? "selected" : ""}>Gallery first</option>
+              <option value="collections" ${prefs.profile_content_focus === "collections" ? "selected" : ""}>Collections first</option>
+              <option value="social" ${prefs.profile_content_focus === "social" ? "selected" : ""}>Social first</option>
             </select>
           </label>
           <label class="field">
@@ -2577,6 +2651,9 @@ function profileCustomizationMarkup(user) {
               <option value="gradient" ${prefs.profile_banner_style === "gradient" ? "selected" : ""}>Gradient</option>
               <option value="mesh" ${prefs.profile_banner_style === "mesh" ? "selected" : ""}>Mesh</option>
               <option value="frame" ${prefs.profile_banner_style === "frame" ? "selected" : ""}>Framed</option>
+              <option value="aurora" ${prefs.profile_banner_style === "aurora" ? "selected" : ""}>Aurora</option>
+              <option value="spotlight" ${prefs.profile_banner_style === "spotlight" ? "selected" : ""}>Spotlight</option>
+              <option value="poster" ${prefs.profile_banner_style === "poster" ? "selected" : ""}>Poster</option>
             </select>
           </label>
           <label class="field">
@@ -2585,11 +2662,38 @@ function profileCustomizationMarkup(user) {
               <option value="glass" ${prefs.profile_card_style === "glass" ? "selected" : ""}>Glass</option>
               <option value="solid" ${prefs.profile_card_style === "solid" ? "selected" : ""}>Solid</option>
               <option value="outline" ${prefs.profile_card_style === "outline" ? "selected" : ""}>Outline</option>
+              <option value="elevated" ${prefs.profile_card_style === "elevated" ? "selected" : ""}>Elevated</option>
+              <option value="soft" ${prefs.profile_card_style === "soft" ? "selected" : ""}>Soft</option>
+              <option value="edge" ${prefs.profile_card_style === "edge" ? "selected" : ""}>Edge accent</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Stat style</span>
+            <select id="profile-page-stat-style">
+              <option value="tiles" ${prefs.profile_stat_style === "tiles" ? "selected" : ""}>Tiles</option>
+              <option value="ribbon" ${prefs.profile_stat_style === "ribbon" ? "selected" : ""}>Ribbon</option>
+              <option value="minimal" ${prefs.profile_stat_style === "minimal" ? "selected" : ""}>Minimal</option>
             </select>
           </label>
           <label class="check-card">
             <input id="profile-page-show-joined-date" type="checkbox" ${prefs.profile_show_joined_date !== false ? "checked" : ""} />
             <span>Show joined date on the profile page</span>
+          </label>
+          <label class="check-card">
+            <input id="profile-page-show-follow-counts" type="checkbox" ${prefs.profile_show_follow_counts !== false ? "checked" : ""} />
+            <span>Show follow and friend counts</span>
+          </label>
+          <label class="check-card">
+            <input id="profile-page-show-uploads" type="checkbox" ${prefs.profile_show_uploads !== false ? "checked" : ""} />
+            <span>Show uploads section</span>
+          </label>
+          <label class="check-card">
+            <input id="profile-page-show-collections" type="checkbox" ${prefs.profile_show_collections !== false ? "checked" : ""} />
+            <span>Show collections section</span>
+          </label>
+          <label class="check-card">
+            <input id="profile-page-show-friends" type="checkbox" ${prefs.profile_show_friends !== false ? "checked" : ""} />
+            <span>Show friends section</span>
           </label>
         </div>
         <div class="modal-actions">
@@ -2604,12 +2708,44 @@ function profileCustomizationMarkup(user) {
 function renderProfile(data) {
   const user = data.user || {};
   const prefs = { ...DEFAULT_USER_SETTINGS, ...(user.user_settings || {}) };
+  const visibility = {
+    showJoinedDate: prefs.profile_show_joined_date !== false,
+    showUploads: prefs.profile_show_uploads !== false,
+    showCollections: prefs.profile_show_collections !== false,
+    showFriends: prefs.profile_show_friends !== false,
+    showFollowCounts: prefs.profile_show_follow_counts !== false,
+    showLikeStats: user.show_liked_count !== false,
+  };
   const joined = user.created_at ? new Date(user.created_at).toLocaleDateString() : "";
   $("profile-dialog-title").textContent = user.display_name || user.username || "Profile";
   const tags = (user.featured_tags || []).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("");
   const media = data.media || [];
   const collections = data.collections || [];
   const friends = data.friends || [];
+  const compactStats = [
+    { label: "Posts", value: Number(user.media_count || 0) },
+    visibility.showFollowCounts ? { label: "Followers", value: Number(user.follower_count || 0) } : null,
+    visibility.showFollowCounts ? { label: "Following", value: Number(user.following_count || 0) } : null,
+    visibility.showFriends ? { label: "Friends", value: Number(user.friend_count || 0) } : null,
+    { label: "Downloads", value: Number(user.download_count || 0) },
+    visibility.showLikeStats ? { label: "Likes", value: Number(user.like_count || 0) } : null,
+  ].filter(Boolean);
+  const statCards = [
+    { label: "Posts", value: Number(user.media_count || 0), note: "Published uploads" },
+    visibility.showFollowCounts ? { label: "Followers", value: Number(user.follower_count || 0), note: "People following this profile" } : null,
+    visibility.showFollowCounts ? { label: "Following", value: Number(user.following_count || 0), note: "Creators this profile follows" } : null,
+    visibility.showFriends ? { label: "Friends", value: Number(user.friend_count || 0), note: "Accepted mutuals" } : null,
+    { label: "Downloads", value: Number(user.download_count || 0), note: "Downloads on public posts" },
+    visibility.showLikeStats ? { label: "Likes", value: Number(user.like_count || 0), note: "Total likes across public work" } : null,
+  ].filter(Boolean);
+  const heroRibbonItems = [
+    tags || "",
+    user.website_url ? "<span>Website linked</span>" : "",
+    user.public_profile === false ? "<span>Private profile</span>" : "",
+    prefs.profile_content_focus === "collections" ? "<span>Collections-forward layout</span>" : "",
+    prefs.profile_content_focus === "social" ? "<span>Social-forward layout</span>" : "",
+  ].filter(Boolean);
+  const heroRibbonMarkup = heroRibbonItems.length ? `<div class="profile-ribbon">${heroRibbonItems.join("")}</div>` : "";
   const compactMarkup = `
     <section class="profile-hero" style="--profile-accent:${escapeHtml(user.profile_color || "#37c9a7")}">
       <div class="avatar large">${user.avatar_url ? `<img src="${user.avatar_url}" alt="">` : escapeHtml((user.display_name || user.username || "IG").slice(0, 2).toUpperCase())}</div>
@@ -2628,29 +2764,88 @@ function renderProfile(data) {
       </div>
     </section>
     <section class="profile-stats">
-      <div><strong>${Number(user.media_count || 0)}</strong><span>Posts</span></div>
-      <div><strong>${Number(user.follower_count || 0)}</strong><span>Followers</span></div>
-      <div><strong>${Number(user.following_count || 0)}</strong><span>Following</span></div>
-      <div><strong>${Number(user.friend_count || 0)}</strong><span>Friends</span></div>
-      <div><strong>${Number(user.download_count || 0)}</strong><span>Downloads</span></div>
-      <div><strong>${Number(user.like_count || 0)}</strong><span>Likes</span></div>
+      ${compactStats.map((item) => `<div><strong>${item.value}</strong><span>${item.label}</span></div>`).join("")}
     </section>
   `;
+  const uploadsSection = visibility.showUploads ? `
+    <section class="profile-section-card">
+      <header><h3>Recent Uploads</h3><span class="muted">${media.length}</span></header>
+      <div class="mini-media-grid">${media.length ? media.map((item) => `
+        <button class="mini-media" type="button" data-open="${item.id}">
+          ${renderPreview(item, "mini")}
+          <span>${adultBadge(item)}${escapeHtml(item.title)}</span>
+        </button>
+      `).join("") : `<p class="muted">No public uploads to show.</p>`}</div>
+    </section>
+  ` : "";
+  const collectionsSection = visibility.showCollections ? `
+    <section class="profile-section-card">
+      <header><h3>Collections</h3><span class="muted">${collections.length}</span></header>
+      <div class="profile-collection-grid">${collections.length ? collections.map((collection) => collectionCardMarkup(collection)).join("") : `<p class="muted">No public collections to show.</p>`}</div>
+    </section>
+  ` : "";
+  const friendsSection = visibility.showFriends ? `
+    <section class="profile-section-card">
+      <header><h3>Friends</h3><span class="muted">${friends.length}</span></header>
+      <div class="profile-friend-grid">${friends.length ? friends.map((friend) => userCard(friend, { compact: true })).join("") : `<p class="muted">No friends to show.</p>`}</div>
+    </section>
+  ` : "";
+  const detailsBadges = [
+    visibility.showFollowCounts ? `<span>${Number(user.following_count || 0)} following</span>` : "",
+    visibility.showFollowCounts ? `<span>${Number(user.follower_count || 0)} followers</span>` : "",
+    visibility.showFriends ? `<span>${Number(user.friend_count || 0)} friends</span>` : "",
+    user.location_label ? `<span>${escapeHtml(user.location_label)}</span>` : "",
+  ].filter(Boolean);
+  const detailsSection = `
+    <section class="profile-section-card">
+      <header><h3>Profile Details</h3></header>
+      <div class="profile-ribbon">
+        ${detailsBadges.length ? detailsBadges.join("") : "<span>Keeping things low-key for now.</span>"}
+      </div>
+    </section>
+  `;
+  let mainSections = [];
+  let railSections = [];
+  switch (prefs.profile_content_focus || "balanced") {
+    case "collections":
+      if (collectionsSection) mainSections.push(collectionsSection);
+      if (uploadsSection) mainSections.push(uploadsSection);
+      if (friendsSection) railSections.push(friendsSection);
+      railSections.push(detailsSection);
+      break;
+    case "social":
+      if (friendsSection) mainSections.push(friendsSection);
+      if (uploadsSection) mainSections.push(uploadsSection);
+      if (collectionsSection) railSections.push(collectionsSection);
+      railSections.push(detailsSection);
+      break;
+    case "gallery":
+      if (uploadsSection) mainSections.push(uploadsSection);
+      if (collectionsSection) mainSections.push(collectionsSection);
+      railSections.push(detailsSection);
+      if (friendsSection) railSections.push(friendsSection);
+      break;
+    default:
+      if (uploadsSection) mainSections.push(uploadsSection);
+      if (collectionsSection) mainSections.push(collectionsSection);
+      if (friendsSection) railSections.push(friendsSection);
+      railSections.push(detailsSection);
+      break;
+  }
+  if (!mainSections.length) {
+    mainSections = [`<section class="profile-section-card"><p class="muted">This profile is keeping its showcase sections hidden for now.</p></section>`];
+  }
   const expandedMarkup = `
-    <div class="profile-showcase profile-layout-${escapeHtml(prefs.profile_layout || "spotlight")} profile-card-style-${escapeHtml(prefs.profile_card_style || "glass")}" data-banner-style="${escapeHtml(prefs.profile_banner_style || "gradient")}" style="--profile-accent:${escapeHtml(user.profile_color || "#37c9a7")}">
+    <div class="profile-showcase profile-layout-${escapeHtml(prefs.profile_layout || "spotlight")} profile-card-style-${escapeHtml(prefs.profile_card_style || "glass")}" data-banner-style="${escapeHtml(prefs.profile_banner_style || "gradient")}" data-hero-align="${escapeHtml(prefs.profile_hero_alignment || "split")}" style="--profile-accent:${escapeHtml(user.profile_color || "#37c9a7")}">
       <div class="profile-showcase-top">
         <div class="avatar large">${user.avatar_url ? `<img src="${user.avatar_url}" alt="">` : escapeHtml((user.display_name || user.username || "IG").slice(0, 2).toUpperCase())}</div>
         <div class="profile-showcase-copy">
           <p class="page-eyebrow">Profile</p>
           <h2>${escapeHtml(user.display_name || user.username)}</h2>
-          <p class="muted">@${escapeHtml(user.username || "")}${user.location_label ? ` · ${escapeHtml(user.location_label)}` : ""}${prefs.profile_show_joined_date !== false && joined ? ` · Joined ${escapeHtml(joined)}` : ""}</p>
+          <p class="muted">@${escapeHtml(user.username || "")}${user.location_label ? ` · ${escapeHtml(user.location_label)}` : ""}${visibility.showJoinedDate && joined ? ` · Joined ${escapeHtml(joined)}` : ""}</p>
           ${user.profile_headline ? `<p class="profile-headline">${escapeHtml(user.profile_headline)}</p>` : ""}
           ${user.bio ? `<p>${escapeHtml(user.bio)}</p>` : ""}
-          <div class="profile-ribbon">
-            ${tags || ""}
-            ${user.website_url ? `<span>Website linked</span>` : ""}
-            ${user.public_profile === false ? `<span>Private profile</span>` : ""}
-          </div>
+          ${heroRibbonMarkup}
         </div>
         <div class="profile-actions">
           <button type="button" data-follow-user="${user.id}">${user.followed_by_me ? "Unfollow" : "Follow"}</button>
@@ -2660,43 +2855,23 @@ function renderProfile(data) {
           ${currentUser?.username === user.username ? `<button type="button" data-profile-customize-toggle="1">${profileCustomizeOpen ? "Hide Controls" : "Customize Profile"}</button>` : ""}
         </div>
       </div>
-      <div class="profile-spotlight-grid">
-        <article class="profile-insight-card"><h3>Posts</h3><strong>${Number(user.media_count || 0)}</strong><span class="muted">Published uploads</span></article>
-        <article class="profile-insight-card"><h3>Followers</h3><strong>${Number(user.follower_count || 0)}</strong><span class="muted">People following this profile</span></article>
-        <article class="profile-insight-card"><h3>Likes</h3><strong>${Number(user.like_count || 0)}</strong><span class="muted">Total likes across public work</span></article>
-        <article class="profile-insight-card"><h3>Downloads</h3><strong>${Number(user.download_count || 0)}</strong><span class="muted">Downloads on public posts</span></article>
+      <div class="profile-spotlight-grid" data-stat-style="${escapeHtml(prefs.profile_stat_style || "tiles")}">
+        ${statCards.map((item) => `
+          <article class="profile-insight-card">
+            <h3>${item.label}</h3>
+            <strong>${item.value}</strong>
+            <span class="muted">${item.note}</span>
+          </article>
+        `).join("")}
       </div>
       ${profileCustomizationMarkup(user)}
     </div>
-    <div class="profile-dashboard profile-layout-${escapeHtml(prefs.profile_layout || "spotlight")} profile-card-style-${escapeHtml(prefs.profile_card_style || "glass")}">
+    <div class="profile-dashboard profile-layout-${escapeHtml(prefs.profile_layout || "spotlight")} profile-card-style-${escapeHtml(prefs.profile_card_style || "glass")} profile-focus-${escapeHtml(prefs.profile_content_focus || "balanced")}">
       <div class="profile-column">
-        <section class="profile-section-card">
-          <header><h3>Recent Uploads</h3><span class="muted">${media.length}</span></header>
-          <div class="mini-media-grid">${media.length ? media.map((item) => `
-            <button class="mini-media" type="button" data-open="${item.id}">
-              ${renderPreview(item, "mini")}
-              <span>${adultBadge(item)}${escapeHtml(item.title)}</span>
-            </button>
-          `).join("") : `<p class="muted">No public uploads to show.</p>`}</div>
-        </section>
-        <section class="profile-section-card">
-          <header><h3>Collections</h3><span class="muted">${collections.length}</span></header>
-          <div class="profile-collection-grid">${collections.length ? collections.map((collection) => collectionCardMarkup(collection)).join("") : `<p class="muted">No public collections to show.</p>`}</div>
-        </section>
+        ${mainSections.join("")}
       </div>
       <aside class="profile-rail">
-        <section class="profile-section-card">
-          <header><h3>Friends</h3><span class="muted">${friends.length}</span></header>
-          <div class="profile-friend-grid">${friends.length ? friends.map((friend) => userCard(friend, { compact: true })).join("") : `<p class="muted">No friends to show.</p>`}</div>
-        </section>
-        <section class="profile-section-card">
-          <header><h3>Profile Details</h3></header>
-          <div class="profile-ribbon">
-            <span>${Number(user.following_count || 0)} following</span>
-            <span>${Number(user.friend_count || 0)} friends</span>
-            ${user.location_label ? `<span>${escapeHtml(user.location_label)}</span>` : ""}
-          </div>
-        </section>
+        ${railSections.join("")}
       </aside>
     </div>
   `;
@@ -2850,7 +3025,14 @@ async function saveProfileCustomization() {
         profile_layout: safeEl("profile-page-layout")?.value || "spotlight",
         profile_banner_style: safeEl("profile-page-banner-style")?.value || "gradient",
         profile_card_style: safeEl("profile-page-card-style")?.value || "glass",
+        profile_stat_style: safeEl("profile-page-stat-style")?.value || "tiles",
+        profile_content_focus: safeEl("profile-page-content-focus")?.value || "balanced",
+        profile_hero_alignment: safeEl("profile-page-hero-alignment")?.value || "split",
         profile_show_joined_date: Boolean(safeEl("profile-page-show-joined-date")?.checked),
+        profile_show_uploads: Boolean(safeEl("profile-page-show-uploads")?.checked),
+        profile_show_collections: Boolean(safeEl("profile-page-show-collections")?.checked),
+        profile_show_friends: Boolean(safeEl("profile-page-show-friends")?.checked),
+        profile_show_follow_counts: Boolean(safeEl("profile-page-show-follow-counts")?.checked),
       }),
     });
     currentUser = data.user || currentUser;
@@ -3827,6 +4009,7 @@ async function boot() {
   const hasBackendConfig = await initApiOrigin();
   if (REMOTE_MODE && !hasBackendConfig) return;
   try {
+    refreshSiteBackground({ force: false });
     if (token) await refreshMe();
     await refreshAll();
     const hashProfile = decodeURIComponent(location.hash || "").match(/^#user\/(.+)/)?.[1];

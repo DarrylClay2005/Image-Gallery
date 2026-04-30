@@ -38,6 +38,9 @@ DEFAULT_USER_SETTINGS = {
     "profile_layout": "spotlight",
     "profile_banner_style": "gradient",
     "profile_card_style": "glass",
+    "profile_stat_style": "tiles",
+    "profile_content_focus": "balanced",
+    "profile_hero_alignment": "split",
     "profile_show_joined_date": True,
 }
 USER_COLUMNS = (
@@ -727,9 +730,12 @@ class GalleryDatabase:
             "theme_mode": {"system", "dark", "light"},
             "grid_density": {"compact", "comfortable", "wide"},
             "default_sort": {"new", "popular", "downloads", "views", "old"},
-            "profile_layout": {"spotlight", "magazine", "stack"},
-            "profile_banner_style": {"gradient", "mesh", "frame"},
-            "profile_card_style": {"glass", "solid", "outline"},
+            "profile_layout": {"spotlight", "magazine", "stack", "split", "mosaic", "timeline"},
+            "profile_banner_style": {"gradient", "mesh", "frame", "aurora", "spotlight", "poster"},
+            "profile_card_style": {"glass", "solid", "outline", "elevated", "soft", "edge"},
+            "profile_stat_style": {"tiles", "ribbon", "minimal"},
+            "profile_content_focus": {"balanced", "gallery", "collections", "social"},
+            "profile_hero_alignment": {"split", "start", "center"},
         }
         for key in DEFAULT_USER_SETTINGS:
             if key not in payload:
@@ -1150,6 +1156,30 @@ class GalleryDatabase:
                 await cur.execute("SELECT id FROM media_items ORDER BY RAND() LIMIT 1")
                 row = await cur.fetchone()
         return await self.get_media(int(row["id"]), viewer_id) if row else items[0]
+
+    async def list_public_background_candidates(self, limit: int = 600) -> list[dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    f"""
+                    SELECT m.id, m.user_id, m.title, m.storage_path, m.mime_type, m.original_filename,
+                           m.media_kind, m.file_size, m.is_adult, m.visibility, {MEDIA_CATEGORY_SELECT}
+                           u.username,
+                           CASE WHEN u.public_profile=1 THEN u.display_name ELSE u.username END AS display_name,
+                           u.profile_color, u.public_profile
+                    FROM media_items m
+                    {MEDIA_CATEGORY_JOIN}
+                    JOIN users u ON u.id = m.user_id
+                    WHERE m.deleted_at IS NULL
+                      AND m.visibility='public'
+                      AND m.media_kind='image'
+                      AND m.is_adult=0
+                    ORDER BY COALESCE(m.pinned_at, m.created_at) DESC, m.created_at DESC
+                    LIMIT %s
+                    """,
+                    (max(1, min(limit, 1200)),),
+                )
+                return [self._decode_media(row) for row in await cur.fetchall()]
 
     async def tag_cloud(self, limit: int = 30) -> list[dict[str, Any]]:
         async with self.pool.acquire() as conn:
