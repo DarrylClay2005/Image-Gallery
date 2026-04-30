@@ -201,18 +201,42 @@ class GalleryDatabase:
         try:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    f"CREATE DATABASE IF NOT EXISTS `{self.settings.db_schema}` "
-                    "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                    """
+                    SELECT 1
+                    FROM information_schema.schemata
+                    WHERE schema_name = %s
+                    LIMIT 1
+                    """,
+                    (self.settings.db_schema,),
                 )
+                if not await cur.fetchone():
+                    await cur.execute(
+                        f"CREATE DATABASE `{self.settings.db_schema}` "
+                        "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                    )
         finally:
             conn.close()
 
     async def ensure_tables(self) -> None:
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
+                async def ensure_table(name: str, ddl: str) -> None:
+                    await cur.execute(
+                        """
+                        SELECT 1
+                        FROM information_schema.tables
+                        WHERE table_schema = %s AND table_name = %s
+                        LIMIT 1
+                        """,
+                        (self.settings.db_schema, name),
+                    )
+                    if not await cur.fetchone():
+                        await cur.execute(ddl)
+
+                await ensure_table(
+                    "users",
                     """
-                    CREATE TABLE IF NOT EXISTS users (
+                    CREATE TABLE users (
                       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
                       username VARCHAR(40) NOT NULL UNIQUE,
                       display_name VARCHAR(80) NOT NULL,
@@ -220,11 +244,12 @@ class GalleryDatabase:
                       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                       last_login_at TIMESTAMP NULL DEFAULT NULL
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                    """
+                    """,
                 )
-                await cur.execute(
+                await ensure_table(
+                    "categories",
                     """
-                    CREATE TABLE IF NOT EXISTS categories (
+                    CREATE TABLE categories (
                       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
                       name VARCHAR(80) NOT NULL UNIQUE,
                       slug VARCHAR(90) NOT NULL UNIQUE,
@@ -233,11 +258,12 @@ class GalleryDatabase:
                       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                       CONSTRAINT fk_categories_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                    """
+                    """,
                 )
-                await cur.execute(
+                await ensure_table(
+                    "media_items",
                     """
-                    CREATE TABLE IF NOT EXISTS media_items (
+                    CREATE TABLE media_items (
                       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
                       user_id BIGINT UNSIGNED NOT NULL,
                       category_id BIGINT UNSIGNED NOT NULL,
@@ -260,12 +286,13 @@ class GalleryDatabase:
                       CONSTRAINT fk_media_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
                       CONSTRAINT fk_media_category FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE RESTRICT
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                    """
+                    """,
                 )
 
-                await cur.execute(
+                await ensure_table(
+                    "media_files",
                     """
-                    CREATE TABLE IF NOT EXISTS media_files (
+                    CREATE TABLE media_files (
                       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
                       sha256 CHAR(64) NOT NULL UNIQUE,
                       mime_type VARCHAR(120) NOT NULL,
@@ -279,11 +306,12 @@ class GalleryDatabase:
                       KEY idx_media_files_user (created_by),
                       CONSTRAINT fk_media_files_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                    """
+                    """,
                 )
-                await cur.execute(
+                await ensure_table(
+                    "media_file_chunks",
                     """
-                    CREATE TABLE IF NOT EXISTS media_file_chunks (
+                    CREATE TABLE media_file_chunks (
                       file_id BIGINT UNSIGNED NOT NULL,
                       chunk_index INT UNSIGNED NOT NULL,
                       content LONGBLOB NOT NULL,
@@ -291,11 +319,12 @@ class GalleryDatabase:
                       PRIMARY KEY (file_id, chunk_index),
                       CONSTRAINT fk_media_file_chunks_file FOREIGN KEY (file_id) REFERENCES media_files(id) ON DELETE CASCADE
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                    """
+                    """,
                 )
-                await cur.execute(
+                await ensure_table(
+                    "user_avatar_files",
                     """
-                    CREATE TABLE IF NOT EXISTS user_avatar_files (
+                    CREATE TABLE user_avatar_files (
                       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
                       user_id BIGINT UNSIGNED NOT NULL,
                       sha256 CHAR(64) NOT NULL,
@@ -308,11 +337,12 @@ class GalleryDatabase:
                       UNIQUE KEY uniq_avatar_user_hash (user_id, sha256),
                       CONSTRAINT fk_avatar_files_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                    """
+                    """,
                 )
-                await cur.execute(
+                await ensure_table(
+                    "user_follows",
                     """
-                    CREATE TABLE IF NOT EXISTS user_follows (
+                    CREATE TABLE user_follows (
                       follower_id BIGINT UNSIGNED NOT NULL,
                       followed_id BIGINT UNSIGNED NOT NULL,
                       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -322,11 +352,12 @@ class GalleryDatabase:
                       CONSTRAINT fk_follows_followed FOREIGN KEY (followed_id) REFERENCES users(id) ON DELETE CASCADE,
                       CONSTRAINT chk_no_self_follow CHECK (follower_id <> followed_id)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                    """
+                    """,
                 )
-                await cur.execute(
+                await ensure_table(
+                    "friend_requests",
                     """
-                    CREATE TABLE IF NOT EXISTS friend_requests (
+                    CREATE TABLE friend_requests (
                       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
                       requester_id BIGINT UNSIGNED NOT NULL,
                       addressee_id BIGINT UNSIGNED NOT NULL,
@@ -340,11 +371,12 @@ class GalleryDatabase:
                       CONSTRAINT fk_friend_addressee FOREIGN KEY (addressee_id) REFERENCES users(id) ON DELETE CASCADE,
                       CONSTRAINT chk_no_self_friend CHECK (requester_id <> addressee_id)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                    """
+                    """,
                 )
-                await cur.execute(
+                await ensure_table(
+                    "auth_attempts",
                     """
-                    CREATE TABLE IF NOT EXISTS auth_attempts (
+                    CREATE TABLE auth_attempts (
                       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
                       username VARCHAR(80) NULL,
                       ip_address VARCHAR(64) NOT NULL,
@@ -353,11 +385,12 @@ class GalleryDatabase:
                       KEY idx_auth_attempts_ip_time (ip_address, created_at),
                       KEY idx_auth_attempts_user_time (username, created_at)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                    """
+                    """,
                 )
-                await cur.execute(
+                await ensure_table(
+                    "media_likes",
                     """
-                    CREATE TABLE IF NOT EXISTS media_likes (
+                    CREATE TABLE media_likes (
                       user_id BIGINT UNSIGNED NOT NULL,
                       media_id BIGINT UNSIGNED NOT NULL,
                       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -365,11 +398,12 @@ class GalleryDatabase:
                       CONSTRAINT fk_likes_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
                       CONSTRAINT fk_likes_media FOREIGN KEY (media_id) REFERENCES media_items(id) ON DELETE CASCADE
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                    """
+                    """,
                 )
-                await cur.execute(
+                await ensure_table(
+                    "media_comments",
                     """
-                    CREATE TABLE IF NOT EXISTS media_comments (
+                    CREATE TABLE media_comments (
                       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
                       media_id BIGINT UNSIGNED NOT NULL,
                       user_id BIGINT UNSIGNED NOT NULL,
@@ -379,11 +413,12 @@ class GalleryDatabase:
                       CONSTRAINT fk_comments_media FOREIGN KEY (media_id) REFERENCES media_items(id) ON DELETE CASCADE,
                       CONSTRAINT fk_comments_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                    """
+                    """,
                 )
-                await cur.execute(
+                await ensure_table(
+                    "media_bookmarks",
                     """
-                    CREATE TABLE IF NOT EXISTS media_bookmarks (
+                    CREATE TABLE media_bookmarks (
                       user_id BIGINT UNSIGNED NOT NULL,
                       media_id BIGINT UNSIGNED NOT NULL,
                       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -391,11 +426,12 @@ class GalleryDatabase:
                       CONSTRAINT fk_bookmarks_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
                       CONSTRAINT fk_bookmarks_media FOREIGN KEY (media_id) REFERENCES media_items(id) ON DELETE CASCADE
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                    """
+                    """,
                 )
-                await cur.execute(
+                await ensure_table(
+                    "media_collections",
                     """
-                    CREATE TABLE IF NOT EXISTS media_collections (
+                    CREATE TABLE media_collections (
                       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
                       user_id BIGINT UNSIGNED NOT NULL,
                       name VARCHAR(100) NOT NULL,
@@ -406,11 +442,12 @@ class GalleryDatabase:
                       KEY idx_collections_user (user_id, created_at),
                       CONSTRAINT fk_collections_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                    """
+                    """,
                 )
-                await cur.execute(
+                await ensure_table(
+                    "media_collection_items",
                     """
-                    CREATE TABLE IF NOT EXISTS media_collection_items (
+                    CREATE TABLE media_collection_items (
                       collection_id BIGINT UNSIGNED NOT NULL,
                       media_id BIGINT UNSIGNED NOT NULL,
                       added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -418,11 +455,12 @@ class GalleryDatabase:
                       CONSTRAINT fk_collection_items_collection FOREIGN KEY (collection_id) REFERENCES media_collections(id) ON DELETE CASCADE,
                       CONSTRAINT fk_collection_items_media FOREIGN KEY (media_id) REFERENCES media_items(id) ON DELETE CASCADE
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                    """
+                    """,
                 )
-                await cur.execute(
+                await ensure_table(
+                    "media_reports",
                     """
-                    CREATE TABLE IF NOT EXISTS media_reports (
+                    CREATE TABLE media_reports (
                       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
                       media_id BIGINT UNSIGNED NOT NULL,
                       user_id BIGINT UNSIGNED NOT NULL,
@@ -435,7 +473,7 @@ class GalleryDatabase:
                       CONSTRAINT fk_reports_media FOREIGN KEY (media_id) REFERENCES media_items(id) ON DELETE CASCADE,
                       CONSTRAINT fk_reports_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-                    """
+                    """,
                 )
         await self.ensure_user_columns()
         await self.ensure_subcategory_tables()
@@ -467,7 +505,18 @@ class GalleryDatabase:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS subcategories (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = %s AND table_name = 'subcategories'
+                    LIMIT 1
+                    """,
+                    (self.settings.db_schema,),
+                )
+                if await cur.fetchone():
+                    return
+                await cur.execute(
+                    """
+                    CREATE TABLE subcategories (
                       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
                       category_id BIGINT UNSIGNED NOT NULL,
                       name VARCHAR(80) NOT NULL,
