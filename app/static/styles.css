@@ -2472,3 +2472,510 @@ input,select,textarea{min-height:42px;border:1px solid var(--ux-line);background
 .empty-state{padding:clamp(24px,4vw,46px);text-align:center}.empty-state h2{font-size:clamp(1.45rem,3vw,2.2rem);letter-spacing:-.04em}.avatar,.user-avatar,.account-avatar,.profile-avatar{border:1px solid color-mix(in srgb,var(--accent) 42%,var(--ux-line));box-shadow:0 14px 38px color-mix(in srgb,var(--accent) 17%,transparent),inset 0 1px 0 rgba(255,255,255,.1)}
 .gallery-pagination{width:fit-content;max-width:100%;margin-inline:auto;padding:8px;border:1px solid var(--ux-line);border-radius:999px;background:rgba(255,255,255,.045);box-shadow:var(--ux-shadow-sm)}.ux-reveal{opacity:0;transform:translateY(14px) scale(.99)}.ux-reveal.ux-visible{opacity:1;transform:none;transition:opacity .42s var(--ux-ease),transform .42s var(--ux-ease)}.topbar-actions button.is-active,.topbar-actions button[aria-current="page"]{color:#06100d;background:linear-gradient(135deg,var(--accent),color-mix(in srgb,var(--accent-2) 72%,var(--accent)));border-color:color-mix(in srgb,var(--accent) 58%,white 10%);font-weight:900}
 @media (hover:none){.media-card:hover,.collection-card:hover,.user-card:hover,.studio-item:hover,.saved-view-card:hover,button:hover,.button-link:hover{transform:none}}@media (max-width:980px){.topbar,.layout{width:min(calc(100vw - 16px),980px)}.topbar{border-radius:26px;align-items:stretch}.topbar-actions{border-radius:24px;overflow-x:auto;scrollbar-width:none}.topbar-actions::-webkit-scrollbar{display:none}.sidebar{top:auto}}@media (max-width:620px){.topbar{margin-top:8px;padding:8px}.brand{width:100%;justify-content:flex-start}.layout{width:calc(100vw - 10px);margin-top:10px}.content{padding:12px;border-radius:26px}.content-head,.page-hero{padding:18px;border-radius:26px}.media-card{border-radius:26px}.modal-shell{width:calc(100vw - 10px);border-radius:26px}}@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}.ux-reveal,.ux-reveal.ux-visible{opacity:1;transform:none;transition:none}}
+
+/* =====================================================================
+   2026 DYNAMIC SCALING + OVERLAP SHIELD — Image Gallery
+   Purpose: prevent any visible UI from colliding, clipping, or being
+   ignored when the viewport, browser zoom, text length, or card density
+   changes. Backend/API behavior is untouched.
+   ===================================================================== */
+:root {
+  --dynamic-ui-scale: 1;
+  --dynamic-page-gutter: clamp(6px, calc(12px * var(--dynamic-ui-scale)), 18px);
+  --dynamic-gap: clamp(7px, calc(13px * var(--dynamic-ui-scale)), 20px);
+  --dynamic-card-min: clamp(168px, 24vw, 286px);
+  --dynamic-button-min: clamp(6.4rem, 20vw, 10.5rem);
+  --dynamic-touch: clamp(34px, calc(42px * var(--dynamic-ui-scale)), 46px);
+  --dynamic-modal-height: calc(100dvh - max(12px, env(safe-area-inset-top)) - max(12px, env(safe-area-inset-bottom)));
+  font-size: clamp(13px, calc(16px * var(--dynamic-ui-scale)), 16px);
+}
+
+html,
+body {
+  max-width: 100%;
+  overflow-x: clip;
+}
+
+@supports not (overflow: clip) {
+  html,
+  body { overflow-x: hidden; }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+img,
+video,
+canvas,
+svg,
+iframe,
+picture {
+  max-width: 100%;
+}
+
+button,
+.button-link,
+input,
+select,
+textarea,
+summary,
+label {
+  min-width: 0;
+  max-width: 100%;
+}
+
+button,
+.button-link,
+.status-pill,
+.tag-chip,
+.badge,
+small,
+.muted,
+p,
+h1,
+h2,
+h3,
+h4,
+span,
+a,
+strong,
+em,
+dd,
+dt,
+li {
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+button,
+.button-link {
+  min-height: var(--dynamic-touch);
+  white-space: normal;
+  line-height: 1.12;
+  text-align: center;
+}
+
+.topbar,
+.layout,
+.compare-tray,
+.toast-region,
+.back-to-top,
+.modal-shell,
+.detail-modal,
+.profile-modal,
+.compare-modal,
+.insights-modal,
+.slideshow-modal {
+  max-width: calc(100vw - (var(--dynamic-page-gutter) * 2)) !important;
+}
+
+.topbar,
+.layout {
+  width: min(1500px, calc(100vw - (var(--dynamic-page-gutter) * 2))) !important;
+}
+
+.layout {
+  gap: var(--dynamic-gap) !important;
+  align-items: start;
+  grid-template-columns: clamp(218px, 21vw, 328px) minmax(0, 1fr);
+}
+
+.sidebar,
+.content,
+.page-panel,
+.content-head,
+.page-hero,
+.discover-hero-shell,
+.collection-detail-panel,
+.profile-showcase,
+.profile-dashboard,
+.profile-column,
+.profile-rail,
+.profile-section-card,
+.profile-insight-card,
+.media-card,
+.media-info,
+.collection-card,
+.studio-item,
+.user-card,
+.saved-view-card,
+.upload-queue-item,
+.account-card,
+.sidebar-block,
+.stats-grid,
+.notice,
+.empty-state,
+.form-grid,
+.field,
+.detail-grid,
+.detail-side,
+.detail-media,
+.modal-shell {
+  min-width: 0 !important;
+  max-width: 100%;
+}
+
+.media-card,
+.collection-card,
+.studio-item,
+.user-card,
+.saved-view-card,
+.profile-section-card,
+.profile-insight-card,
+.upload-queue-item,
+.account-card,
+.sidebar-block,
+.modal-shell,
+.content,
+.sidebar,
+.page-panel {
+  overflow: hidden;
+}
+
+.gallery-grid,
+.collection-list,
+.user-results,
+.studio-list,
+.saved-views-list,
+.mini-media-grid,
+.profile-stats,
+.profile-spotlight-grid,
+.profile-collection-grid,
+.profile-friend-grid,
+.profile-dashboard,
+.studio-summary,
+.insight-summary,
+.insight-grid,
+.detail-tools,
+.stats-grid,
+.form-grid,
+.upload-controls-grid,
+.collections-page-grid .collection-list,
+.collections-page-grid .mini-media-grid,
+.friends-page-grid .user-results,
+.expanded-profile-view .mini-media-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--dynamic-card-min)), 1fr)) !important;
+  gap: var(--dynamic-gap) !important;
+  align-items: stretch;
+}
+
+.media-card-head,
+.author-row,
+.profile-row,
+.profile-mini,
+.comment-head,
+.modal-head,
+.content-head,
+.page-hero,
+.profile-showcase-top,
+.collection-detail-panel,
+.slideshow-footer,
+.upload-queue-item {
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: var(--dynamic-gap);
+}
+
+.media-card h3,
+.collection-card h3,
+.studio-item h3,
+.user-card h3,
+.saved-view-card h3,
+.profile-section-card h3,
+.profile-insight-card h3,
+.detail-inspector dd,
+.detail-inspector dt,
+.upload-queue-item strong,
+.upload-queue-item span,
+.upload-queue-item em,
+.media-meta,
+.media-title,
+.profile-headline {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.media-card h3,
+.collection-card h3,
+.studio-item h3,
+.user-card h3,
+.saved-view-card h3,
+.profile-section-card h3,
+.profile-insight-card h3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.card-actions,
+.action-row,
+.modal-actions,
+.detail-head-actions,
+.detail-tools,
+.profile-actions,
+.user-card-actions,
+.content-actions,
+.page-hero-actions,
+.upload-ai-actions,
+.saved-view-actions,
+.comment-actions,
+.collection-actions {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--dynamic-button-min)), 1fr)) !important;
+  gap: clamp(6px, calc(9px * var(--dynamic-ui-scale)), 12px) !important;
+  align-items: stretch !important;
+  min-width: 0;
+  max-width: 100%;
+  overflow: visible;
+}
+
+.card-actions > *,
+.action-row > *,
+.modal-actions > *,
+.detail-head-actions > *,
+.detail-tools > *,
+.profile-actions > *,
+.user-card-actions > *,
+.content-actions > *,
+.page-hero-actions > *,
+.upload-ai-actions > *,
+.saved-view-actions > *,
+.comment-actions > *,
+.collection-actions > * {
+  width: 100% !important;
+  min-width: 0 !important;
+  justify-content: center;
+}
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--dynamic-gap) !important;
+  padding: clamp(8px, calc(13px * var(--dynamic-ui-scale)), 16px) !important;
+}
+
+.brand {
+  flex: 1 1 220px;
+  min-width: 0 !important;
+  max-width: 100%;
+}
+
+.brand > div,
+.brand span,
+.brand strong,
+.brand small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topbar-actions {
+  flex: 999 1 460px;
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, clamp(5.8rem, 13vw, 9.5rem)), 1fr));
+  gap: clamp(6px, calc(8px * var(--dynamic-ui-scale)), 10px) !important;
+  align-items: stretch;
+  min-width: min(100%, 260px);
+  max-width: 100%;
+  overflow: visible !important;
+  padding: clamp(4px, calc(6px * var(--dynamic-ui-scale)), 8px) !important;
+  border-radius: clamp(18px, 3vw, 999px);
+}
+
+.topbar-actions > * {
+  width: 100%;
+  min-width: 0 !important;
+  max-width: 100%;
+}
+
+.field,
+.modal-shell form,
+.settings-grid,
+.preference-grid,
+.report-grid,
+.collection-form {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.modal {
+  max-width: 100vw;
+  max-height: 100dvh;
+  overflow: clip;
+  padding: 0;
+}
+
+.modal-shell,
+.modal-shell.wide,
+.detail-shell,
+.profile-shell,
+.slideshow-shell {
+  width: min(var(--modal-target-width, 980px), calc(100vw - (var(--dynamic-page-gutter) * 2))) !important;
+  max-height: var(--dynamic-modal-height) !important;
+  overflow: auto !important;
+  overscroll-behavior: contain;
+  padding: clamp(12px, calc(18px * var(--dynamic-ui-scale)), 22px) !important;
+}
+
+.modal-shell.wide,
+.detail-shell,
+.profile-shell {
+  --modal-target-width: 1220px;
+}
+
+.slideshow-shell {
+  --modal-target-width: 1360px;
+}
+
+.detail-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(min(100%, 260px), 360px) !important;
+}
+
+.detail-media {
+  min-height: clamp(190px, 52dvh, 620px) !important;
+}
+
+#detail-media img,
+#detail-media video,
+.detail-media img,
+.detail-media video,
+.slideshow-stage img,
+.slideshow-stage video {
+  width: 100%;
+  height: auto;
+  max-height: min(68dvh, 720px) !important;
+  object-fit: contain;
+}
+
+.compare-grid,
+.compare-layout,
+.profile-dashboard.profile-layout-split,
+.profile-dashboard.profile-layout-mosaic,
+.profile-layout-magazine .profile-spotlight-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, clamp(180px, 32vw, 360px)), 1fr)) !important;
+}
+
+.toast-region,
+.compare-tray {
+  left: var(--dynamic-page-gutter) !important;
+  right: var(--dynamic-page-gutter) !important;
+  width: auto !important;
+}
+
+body[data-ui-size="compact"] .layout,
+body[data-ui-size="narrow"] .layout {
+  grid-template-columns: minmax(0, 1fr) !important;
+}
+
+body[data-ui-size="compact"] .sidebar,
+body[data-ui-size="narrow"] .sidebar {
+  position: static !important;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)) !important;
+}
+
+body[data-ui-size="compact"] .content,
+body[data-ui-size="compact"] .page-panel,
+body[data-ui-size="compact"] .sidebar-block,
+body[data-ui-size="compact"] .account-card,
+body[data-ui-size="compact"] .modal-shell {
+  padding: clamp(10px, 2.8vw, 14px) !important;
+  border-radius: clamp(18px, 5vw, 26px) !important;
+}
+
+body[data-ui-size="compact"] .gallery-grid,
+body[data-ui-size="compact"] .collection-list,
+body[data-ui-size="compact"] .user-results,
+body[data-ui-size="compact"] .studio-list,
+body[data-ui-size="compact"] .mini-media-grid {
+  grid-template-columns: minmax(0, 1fr) !important;
+}
+
+body[data-ui-size="compact"] .topbar-actions,
+body[data-ui-size="compact"] .card-actions,
+body[data-ui-size="compact"] .action-row,
+body[data-ui-size="compact"] .modal-actions,
+body[data-ui-size="compact"] .detail-head-actions,
+body[data-ui-size="compact"] .profile-actions,
+body[data-ui-size="compact"] .user-card-actions,
+body[data-ui-size="compact"] .content-actions,
+body[data-ui-size="compact"] .page-hero-actions {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 5.4rem), 1fr)) !important;
+}
+
+@media (max-width: 980px) {
+  .layout,
+  .detail-grid,
+  .profile-dashboard,
+  .profile-showcase-top,
+  .collection-detail-panel {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  .topbar-actions,
+  .content-actions,
+  .page-hero-actions {
+    overflow: visible !important;
+  }
+}
+
+@media (max-width: 560px) {
+  :root {
+    --dynamic-card-min: min(100%, 156px);
+    --dynamic-button-min: min(100%, 5.2rem);
+  }
+  .topbar,
+  .layout {
+    width: calc(100vw - 8px) !important;
+    max-width: calc(100vw - 8px) !important;
+  }
+  .topbar-actions,
+  .card-actions,
+  .action-row,
+  .modal-actions,
+  .detail-head-actions,
+  .detail-tools,
+  .profile-actions,
+  .user-card-actions,
+  .content-actions,
+  .page-hero-actions,
+  .upload-ai-actions,
+  .saved-view-actions {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  .modal-shell,
+  .modal-shell.wide,
+  .detail-shell,
+  .profile-shell,
+  .slideshow-shell {
+    width: calc(100vw - 8px) !important;
+    max-width: calc(100vw - 8px) !important;
+    max-height: calc(100dvh - 8px) !important;
+  }
+}
+
+.ui-overflow-guard,
+.ui-overflow-guard * {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  overflow-wrap: anywhere !important;
+}
+
+.ui-overflow-guard:not(dialog):not(.modal-shell) {
+  overflow: hidden !important;
+}
+
+.ui-overflow-guard button,
+.ui-overflow-guard .button-link,
+.ui-overflow-guard input,
+.ui-overflow-guard select,
+.ui-overflow-guard textarea {
+  white-space: normal !important;
+}

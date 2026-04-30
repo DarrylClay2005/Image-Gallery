@@ -4241,3 +4241,113 @@ boot();
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ready, { once: true });
   else ready();
 })();
+
+// =====================================================================
+// 2026 Dynamic Scaling + Overlap Shield — Image Gallery
+// Runtime-only UI guard. It does not change API calls, auth, uploads, or DB logic.
+// =====================================================================
+(function installImageGalleryDynamicScalingShield() {
+  const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+  const WATCH_SELECTOR = [
+    '.topbar', '.topbar-actions', '.brand', '.layout', '.sidebar', '.content', '.page-panel',
+    '.content-head', '.page-hero', '.discover-hero-shell', '.gallery-grid', '.media-card', '.media-info',
+    '.media-card-head', '.card-actions', '.action-row', '.modal-actions', '.detail-head-actions',
+    '.profile-actions', '.user-card-actions', '.content-actions', '.page-hero-actions', '.upload-ai-actions',
+    '.saved-view-actions', '.collection-card', '.collection-list', '.studio-item', '.studio-list', '.user-card',
+    '.user-results', '.saved-view-card', '.saved-views-list', '.mini-media-grid', '.detail-grid', '.detail-side',
+    '.detail-tools', '.detail-media', '.modal-shell', '.profile-showcase', '.profile-dashboard', '.profile-column',
+    '.profile-rail', '.profile-section-card', '.profile-insight-card', '.upload-queue-item', '.account-card',
+    '.sidebar-block', '.stats-grid', '.notice', '.empty-state', '.form-grid', '.field'
+  ].join(',');
+
+  let scheduled = false;
+  let observerReady = false;
+
+  function computeScale() {
+    const width = Math.max(320, window.innerWidth || document.documentElement.clientWidth || 320);
+    const height = Math.max(480, window.innerHeight || document.documentElement.clientHeight || 480);
+    const zoomAwareWidthScale = width / 1440;
+    const heightScale = height / 900;
+    return clamp(Math.min(zoomAwareWidthScale, heightScale) + 0.16, 0.76, 1.06);
+  }
+
+  function classifyViewport() {
+    const width = window.innerWidth || document.documentElement.clientWidth || 0;
+    if (width <= 560) return 'compact';
+    if (width <= 980) return 'narrow';
+    if (width >= 1600) return 'wide';
+    return 'normal';
+  }
+
+  function setScaleVars() {
+    const scale = computeScale();
+    document.documentElement.style.setProperty('--dynamic-ui-scale', scale.toFixed(3));
+    document.body?.setAttribute('data-ui-size', classifyViewport());
+  }
+
+  function visibleElement(el) {
+    if (!el || !(el instanceof HTMLElement)) return false;
+    if (!el.isConnected) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function markOverflow(root) {
+    const scope = root && root.querySelectorAll ? root : document;
+    const nodes = new Set();
+    if (scope instanceof HTMLElement && scope.matches(WATCH_SELECTOR)) nodes.add(scope);
+    scope.querySelectorAll?.(WATCH_SELECTOR).forEach((node) => nodes.add(node));
+    nodes.forEach((el) => {
+      if (!visibleElement(el)) return;
+      const horizontalOverflow = el.scrollWidth > Math.ceil(el.clientWidth + 2);
+      el.classList.toggle('ui-overflow-guard', horizontalOverflow);
+    });
+  }
+
+  function run(root) {
+    scheduled = false;
+    if (!document.body) return;
+    setScaleVars();
+    markOverflow(root || document);
+  }
+
+  function schedule(root) {
+    if (scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(() => run(root));
+  }
+
+  function boot() {
+    if (!document.body) return;
+    run(document);
+    window.addEventListener('resize', () => schedule(document), { passive: true });
+    window.addEventListener('orientationchange', () => schedule(document), { passive: true });
+    document.addEventListener('transitionend', (event) => schedule(event.target), { passive: true });
+
+    if ('ResizeObserver' in window && !observerReady) {
+      observerReady = true;
+      const resizeObserver = new ResizeObserver((entries) => {
+        for (const entry of entries) schedule(entry.target);
+      });
+      resizeObserver.observe(document.documentElement);
+      resizeObserver.observe(document.body);
+      document.querySelectorAll(WATCH_SELECTOR).forEach((node) => resizeObserver.observe(node));
+      new MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+          mutation.addedNodes.forEach((node) => {
+            if (node instanceof HTMLElement) {
+              if (node.matches(WATCH_SELECTOR)) resizeObserver.observe(node);
+              node.querySelectorAll?.(WATCH_SELECTOR).forEach((child) => resizeObserver.observe(child));
+            }
+          });
+        }
+        schedule(document);
+      }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'class', 'style', 'open'] });
+    } else {
+      new MutationObserver(() => schedule(document)).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'class', 'style', 'open'] });
+    }
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
+  else boot();
+})();
