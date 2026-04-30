@@ -21,7 +21,8 @@ TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
 STOP_TAGS = {
     "the", "and", "for", "with", "from", "fullview", "generated", "image",
     "standard", "lite", "upscayl", "wallpaper", "desktop", "phone",
-    "background", "version", "text", "movie", "poster", "upload",
+    "background", "backgrounds", "version", "text", "movie", "poster", "upload",
+    "artwork", "fanart", "pic", "photo", "picture",
 }
 LOW_SIGNAL_RE = re.compile(
     r"^(?:img|dsc|pxl|mvimg|screenshot|image|photo|video|scan|untitled|temp|"
@@ -29,6 +30,18 @@ LOW_SIGNAL_RE = re.compile(
     re.IGNORECASE,
 )
 HEXISH_RE = re.compile(r"^[0-9a-f]{8,}$", re.IGNORECASE)
+GENERIC_TITLE_RE = re.compile(
+    r"^(?:background|backgrounds|wallpaper|wallpapers|image|images|photo|photos|"
+    r"picture|pictures|art|artwork|fanart|render|renders|edit|edits|desktop background|"
+    r"phone background|desktop wallpaper|phone wallpaper|imported media|imported image|"
+    r"imported video|imported gif)\s*$",
+    re.IGNORECASE,
+)
+NOISE_TOKEN_RE = re.compile(
+    r"^(?:wp\d+|img[_-]?\d+|dsc[_-]?\d+|pxl[_-]?\d+|mvimg[_-]?\d+|screenshot[_-]?\d+|photo[_-]?\d+|image[_-]?\d+|"
+    r"\d{2,}|[a-f0-9]{8,}|\d{3,4}x\d{3,4}|\d{3,4}p|4k|8k|uhd|fhd|qhd|desktop|phone|backgrounds?|wallpapers?|wallpaper)$",
+    re.IGNORECASE,
+)
 KNOWN_CATEGORIES = [
     "My Little Pony",
     "FNAF",
@@ -133,31 +146,67 @@ def analyze_media_bytes(
         tags_hint=tags_hint or [],
         size=size,
     )
-    enabled = _resolve_bool(ai_enabled, env_name="GALLERY_AI_ENABLED", default=bool(ai_api_key or os.getenv("GALLERY_AI_API_KEY") or os.getenv("OPENAI_API_KEY")))
-    api_key = str(ai_api_key or os.getenv("GALLERY_AI_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
-    if not enabled or not api_key:
+
+    provider = str(os.getenv("GALLERY_AI_PROVIDER", "")).strip().lower()
+    enabled_default = bool(
+        os.getenv("GALLERY_OLLAMA_MODEL")
+        or ai_model
+        or ai_api_key
+        or os.getenv("GALLERY_AI_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+    )
+    enabled = _resolve_bool(ai_enabled, env_name="GALLERY_AI_ENABLED", default=enabled_default)
+    if not enabled:
         return fallback
-    preview_url = _preview_data_url(content, filename, mime_type, media_kind)
-    if not preview_url:
+
+    preview_image_b64 = _preview_base64(content, filename, mime_type, media_kind)
+    if not preview_image_b64:
         return fallback
+
+    timeout_seconds = max(10, int(ai_timeout_seconds or os.getenv("GALLERY_AI_TIMEOUT_SECONDS") or 45))
+
     try:
-        ai_result = _openai_vision_analysis(
-            preview_url=preview_url,
-            filename=filename,
-            mime_type=mime_type,
-            media_kind=media_kind,
-            title_hint=title_hint,
-            description_hint=description_hint,
-            tags_hint=tags_hint or [],
-            fallback=fallback,
-            api_key=api_key,
-            base_url=str(ai_base_url or os.getenv("GALLERY_AI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/"),
-            model=str(ai_model or os.getenv("GALLERY_AI_MODEL") or "gpt-5.4-nano").strip(),
-            timeout_seconds=max(10, int(ai_timeout_seconds or os.getenv("GALLERY_AI_TIMEOUT_SECONDS") or 45)),
-        )
+        if provider == "ollama" or os.getenv("GALLERY_OLLAMA_MODEL"):
+            model = str(ai_model or os.getenv("GALLERY_OLLAMA_MODEL") or "qwen2.5vl:3b").strip()
+            base_url = str(ai_base_url or os.getenv("GALLERY_OLLAMA_BASE_URL") or "http://127.0.0.1:11434").rstrip("/")
+            ai_result = _ollama_vision_analysis(
+                preview_image_b64=preview_image_b64,
+                filename=filename,
+                mime_type=mime_type,
+                media_kind=media_kind,
+                title_hint=title_hint,
+                description_hint=description_hint,
+                tags_hint=tags_hint or [],
+                fallback=fallback,
+                base_url=base_url,
+                model=model,
+                timeout_seconds=timeout_seconds,
+            )
+        else:
+            api_key = str(ai_api_key or os.getenv("GALLERY_AI_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
+            if not api_key:
+                return fallback
+            preview_url = _preview_data_url(content, filename, mime_type, media_kind)
+            if not preview_url:
+                return fallback
+            ai_result = _openai_vision_analysis(
+                preview_url=preview_url,
+                filename=filename,
+                mime_type=mime_type,
+                media_kind=media_kind,
+                title_hint=title_hint,
+                description_hint=description_hint,
+                tags_hint=tags_hint or [],
+                fallback=fallback,
+                api_key=api_key,
+                base_url=str(ai_base_url or os.getenv("GALLERY_AI_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/"),
+                model=str(ai_model or os.getenv("GALLERY_AI_MODEL") or "gpt-5.4-nano").strip(),
+                timeout_seconds=timeout_seconds,
+            )
     except Exception as exc:
         fallback.reason = f"AI suggestion unavailable, using local analyzer: {exc}"
         return fallback
+
     return _merge_analysis(
         ai_result=ai_result,
         fallback=fallback,
@@ -199,16 +248,23 @@ def _heuristic_analysis(
             size=size,
         )
     )
-    title = clean_hint_title or _build_title(filename, category_name, subcategory_name)
     tags = _build_tags(
         filename=filename,
-        title=title,
+        title=clean_hint_title or "",
         description=description_hint,
         category_name=category_name,
         subcategory_name=subcategory_name,
         media_kind=media_kind,
         size=size,
         tags_hint=tags_hint,
+    )
+    title = clean_hint_title if clean_hint_title and not _is_bad_subject_title(clean_hint_title, category_name, subcategory_name) else _compose_specific_title(
+        title="",
+        filename=filename,
+        category_name=category_name,
+        subcategory_name=subcategory_name,
+        tags=tags,
+        media_kind=media_kind,
     )
     suggested_filename = _suggest_filename(
         title=title,
@@ -249,10 +305,33 @@ def _merge_analysis(
     if confidence < 0.45:
         category_name = fallback.category_name
         subcategory_name = fallback.subcategory_name
-    title = ai_title or fallback.title
+
     tags = _merge_tags(_normalize_tags(ai_result.get("tags")), fallback.tags)
     if not tags:
         tags = list(fallback.tags)
+
+    raw_title = ai_title or fallback.title
+    if _is_bad_subject_title(raw_title, category_name, subcategory_name):
+        title = _compose_specific_title(
+            title=raw_title,
+            filename=filename,
+            category_name=category_name,
+            subcategory_name=subcategory_name,
+            tags=tags,
+            media_kind=media_kind,
+        )
+    else:
+        title = raw_title
+    if _is_bad_subject_title(title, category_name, subcategory_name):
+        title = _compose_specific_title(
+            title="",
+            filename=filename,
+            category_name=category_name,
+            subcategory_name=subcategory_name,
+            tags=tags,
+            media_kind=media_kind,
+        )
+
     suggested_filename = _suggest_filename(
         title=title,
         source_filename=filename,
@@ -261,6 +340,7 @@ def _merge_analysis(
         subcategory_name=subcategory_name,
         suggested_base=_clean_filename_base(ai_result.get("suggested_filename_base")),
     )
+    source = "ollama" if (os.getenv("GALLERY_AI_PROVIDER", "").strip().lower() == "ollama" or os.getenv("GALLERY_OLLAMA_MODEL")) and confidence >= 0.45 else ("openai" if confidence >= 0.45 else fallback.source)
     return SmartMediaAnalysis(
         title=title,
         suggested_filename=suggested_filename,
@@ -268,11 +348,101 @@ def _merge_analysis(
         category_name=category_name,
         subcategory_name=subcategory_name,
         is_adult=bool(ai_result.get("is_adult")) or fallback.is_adult,
-        source="openai" if confidence >= 0.45 else fallback.source,
+        source=source,
         confidence=max(confidence, fallback.confidence if confidence < 0.45 else 0.0),
         size=fallback.size,
         reason=_clean_title(ai_result.get("reason")) or fallback.reason,
     )
+
+
+def _ollama_vision_analysis(
+    *,
+    preview_image_b64: str,
+    filename: str,
+    mime_type: str,
+    media_kind: str,
+    title_hint: str,
+    description_hint: str,
+    tags_hint: list[str],
+    fallback: SmartMediaAnalysis,
+    base_url: str,
+    model: str,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    prompt = (
+        "You analyze media uploads for a personal gallery. Return JSON only.\n"
+        "IMPORTANT: Never use generic titles like 'Backgrounds', 'Wallpaper', 'Image', 'Art', or 'Artwork'.\n"
+        "Never use the filename, a file number, upload number, random code, or numeric ID as the title.\n"
+        "Never use titles like '0703', '0721', 'IMG 1234', or 'Wp15784703'.\n"
+        "Never copy category_name into title. Category is metadata, not the title.\n"
+        "The title must mention the subject, character, franchise, or defining content if visible.\n"
+        "If multiple clear named characters appear, title it naturally using both names.\n"
+        "Create up to 12 short lowercase tags. Do not include numeric file IDs as tags.\n"
+        "Only give a specific character or subcategory if the visual evidence is clear.\n"
+        "Prefer these main categories when they fit: " + ", ".join(KNOWN_CATEGORIES) + ".\n"
+        "If it looks like a phone wallpaper use category 'Phone Backgrounds'. If it looks like a desktop wallpaper use 'Desktop Backgrounds'.\n"
+        "If the image is NSFW, set is_adult true.\n"
+        "Return exactly this JSON schema:"
+        '{"title":"string","suggested_filename_base":"string","tags":["tag"],"category_name":"string","subcategory_name":"string","is_adult":false,"confidence":0.0,"reason":"string"}\n\n'
+        f"Filename: {filename}\n"
+        f"MIME type: {mime_type}\n"
+        f"Media kind: {media_kind}\n"
+        f"Existing title hint: {_clean_title(title_hint) or '(none)'}\n"
+        f"Existing description hint: {_clean_title(description_hint) or '(none)'}\n"
+        f"Existing tags hint: {', '.join(_normalize_tags(tags_hint)) or '(none)'}\n"
+        f"Local analyzer fallback title: {fallback.title}\n"
+        f"Local analyzer fallback category: {fallback.category_name or 'Wallpapers'}\n"
+        f"Local analyzer fallback subcategory: {fallback.subcategory_name or '(none)'}"
+    )
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "images": [preview_image_b64],
+        "stream": False,
+        "format": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "suggested_filename_base": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "category_name": {"type": "string"},
+                "subcategory_name": {"type": "string"},
+                "is_adult": {"type": "boolean"},
+                "confidence": {"type": "number"},
+                "reason": {"type": "string"},
+            },
+            "required": [
+                "title",
+                "suggested_filename_base",
+                "tags",
+                "category_name",
+                "subcategory_name",
+                "is_adult",
+                "confidence",
+                "reason",
+            ],
+        },
+        "options": {"temperature": 0.2},
+    }
+    request = urllib.request.Request(
+        f"{base_url}/api/generate",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Ollama API error {exc.code}: {body[:240]}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Ollama API network error: {exc.reason}") from exc
+    data = json.loads(raw or "{}")
+    text = str(data.get("response") or "").strip()
+    if not text:
+        raise RuntimeError("Ollama response did not include text.")
+    return json.loads(text)
 
 
 def _openai_vision_analysis(
@@ -291,16 +461,15 @@ def _openai_vision_analysis(
     timeout_seconds: int,
 ) -> dict[str, Any]:
     instructions = (
-        "You analyze media uploads for a personal gallery. "
-        "Return structured JSON only. "
-        "Make the title natural and concise. "
+        "You analyze media uploads for a personal gallery. Return structured JSON only. "
+        "Never use generic titles like Backgrounds, Wallpaper, Image, Art, or Artwork. "
+        "Make the title natural, concise, and specific to the visible subject. "
         "Create up to 12 short lowercase tags. "
         "Choose a broad category when uncertain. "
         "Only give a specific character or subcategory if the visual evidence is clear. "
         "Prefer these main categories when they fit: "
         + ", ".join(KNOWN_CATEGORIES)
-        + ". "
-        "If nothing specific fits, use Wallpapers, Desktop Backgrounds, Phone Backgrounds, Videos, or Profile Pictures. "
+        + ". If nothing specific fits, use Wallpapers, Desktop Backgrounds, Phone Backgrounds, Videos, or Profile Pictures. "
         "Do not invent lore if the image is ambiguous."
     )
     user_text = (
@@ -320,11 +489,7 @@ def _openai_vision_analysis(
         "properties": {
             "title": {"type": "string"},
             "suggested_filename_base": {"type": "string"},
-            "tags": {
-                "type": "array",
-                "items": {"type": "string"},
-                "maxItems": 12,
-            },
+            "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 12},
             "category_name": {"type": "string"},
             "subcategory_name": {"type": "string"},
             "is_adult": {"type": "boolean"},
@@ -347,14 +512,7 @@ def _openai_vision_analysis(
         "store": False,
         "temperature": 0.2,
         "reasoning": {"effort": "low"},
-        "text": {
-            "format": {
-                "type": "json_schema",
-                "name": "gallery_media_analysis",
-                "strict": True,
-                "schema": schema,
-            }
-        },
+        "text": {"format": {"type": "json_schema", "name": "gallery_media_analysis", "strict": True, "schema": schema}},
         "input": [
             {"role": "system", "content": [{"type": "input_text", "text": instructions}]},
             {
@@ -369,10 +527,7 @@ def _openai_vision_analysis(
     request = urllib.request.Request(
         f"{base_url}/responses",
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         method="POST",
     )
     try:
@@ -406,7 +561,6 @@ def _media_size(content: bytes, filename: str, mime_type: str, media_kind: str) 
     if media_kind == "image":
         try:
             from PIL import Image
-
             Image.MAX_IMAGE_PIXELS = None
             with Image.open(io.BytesIO(content)) as image:
                 return tuple(int(part) for part in image.size)
@@ -443,36 +597,33 @@ def _video_size(content: bytes, filename: str, mime_type: str) -> tuple[int, int
             return None
 
 
-def _preview_data_url(content: bytes, filename: str, mime_type: str, media_kind: str) -> str | None:
+def _preview_base64(content: bytes, filename: str, mime_type: str, media_kind: str) -> str | None:
     if media_kind == "image":
-        return _image_preview_data_url(content, filename, mime_type)
+        try:
+            from PIL import Image, ImageSequence
+            Image.MAX_IMAGE_PIXELS = None
+            with Image.open(io.BytesIO(content)) as image:
+                frame = next(ImageSequence.Iterator(image), image)
+                preview = frame.convert("RGB")
+                preview.thumbnail((1400, 1400))
+                output = io.BytesIO()
+                preview.save(output, format="JPEG", quality=84, optimize=True)
+                return base64.b64encode(output.getvalue()).decode("ascii")
+        except Exception:
+            return base64.b64encode(content).decode("ascii")
     if media_kind == "video":
-        return _video_preview_data_url(content, filename, mime_type)
+        return _video_preview_base64(content, filename, mime_type)
     return None
 
 
-def _image_preview_data_url(content: bytes, filename: str, mime_type: str) -> str | None:
-    try:
-        from PIL import Image, ImageSequence
-
-        Image.MAX_IMAGE_PIXELS = None
-        with Image.open(io.BytesIO(content)) as image:
-            frame = next(ImageSequence.Iterator(image), image)
-            preview = frame.convert("RGB")
-            preview.thumbnail((1400, 1400))
-            output = io.BytesIO()
-            preview.save(output, format="JPEG", quality=84, optimize=True)
-            encoded = base64.b64encode(output.getvalue()).decode("ascii")
-            return f"data:image/jpeg;base64,{encoded}"
-    except Exception:
-        try:
-            encoded = base64.b64encode(content).decode("ascii")
-            return f"data:{mime_type or 'application/octet-stream'};base64,{encoded}"
-        except Exception:
-            return None
+def _preview_data_url(content: bytes, filename: str, mime_type: str, media_kind: str) -> str | None:
+    preview_b64 = _preview_base64(content, filename, mime_type, media_kind)
+    if not preview_b64:
+        return None
+    return f"data:image/jpeg;base64,{preview_b64}"
 
 
-def _video_preview_data_url(content: bytes, filename: str, mime_type: str) -> str | None:
+def _video_preview_base64(content: bytes, filename: str, mime_type: str) -> str | None:
     suffix = Path(filename or "video").suffix or mimetypes.guess_extension(mime_type or "") or ".mp4"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as handle:
         handle.write(content)
@@ -492,59 +643,12 @@ def _video_preview_data_url(content: bytes, filename: str, mime_type: str) -> st
                 capture_output=True,
                 check=True,
             )
-            encoded = base64.b64encode(result.stdout).decode("ascii")
-            return f"data:image/jpeg;base64,{encoded}"
+            return base64.b64encode(result.stdout).decode("ascii")
         except Exception:
             return None
 
 
-def _build_title(filename: str, category_name: str | None, subcategory_name: str | None) -> str:
-    stem = Path(filename).stem.strip()
-    if _looks_low_signal_name(filename):
-        label = subcategory_name or category_name or ("Imported Video" if Path(filename).suffix.lower() in {".mp4", ".mov", ".m4v", ".webm", ".ogg"} else "Imported Media")
-        suffix = re.sub(r"[^0-9A-Za-z]+", "", stem)[:10]
-        return f"{label} {suffix}".strip()[:160]
-    normalized = re.sub(r"[_-]+", " ", stem)
-    tokens = [token for token in normalized.split() if token]
-    if not tokens:
-        return str(subcategory_name or category_name or "Imported Media")[:160]
-    return " ".join(_title_case_token(token) for token in tokens)[:160]
-
-
-def _title_case_token(token: str) -> str:
-    special = {
-        "mlp": "MLP",
-        "fnaf": "FNAF",
-        "sfm": "SFM",
-        "eqg": "EQG",
-        "ai": "AI",
-        "pmv": "PMV",
-        "kpop": "KPOP",
-        "vr": "VR",
-        "3d": "3D",
-        "4k": "4K",
-        "1080p": "1080p",
-        "1440p": "1440p",
-    }
-    lower = token.lower()
-    if lower in special:
-        return special[lower]
-    if lower.isdigit():
-        return lower
-    return lower.capitalize()
-
-
-def _build_tags(
-    *,
-    filename: str,
-    title: str,
-    description: str,
-    category_name: str | None,
-    subcategory_name: str | None,
-    media_kind: str,
-    size: tuple[int, int] | None,
-    tags_hint: list[str],
-) -> list[str]:
+def _build_tags(*, filename: str, title: str, description: str, category_name: str | None, subcategory_name: str | None, media_kind: str, size: tuple[int, int] | None, tags_hint: list[str]) -> list[str]:
     tags: list[str] = []
     if category_name:
         tags.extend(_normalize_tokens(category_name))
@@ -577,7 +681,7 @@ def _build_tags(
 def _normalize_tokens(value: str | None) -> list[str]:
     results: list[str] = []
     for token in clean_tokens(value):
-        if token in STOP_TAGS or len(token) < 3:
+        if token in STOP_TAGS or len(token) < 3 or _is_noise_token(token):
             continue
         results.append(token)
     return results
@@ -606,7 +710,7 @@ def _normalize_tags(values: Any) -> list[str]:
     seen: set[str] = set()
     for raw in candidates:
         tag = re.sub(r"[^a-z0-9_.-]+", "", str(raw or "").strip().lower())[:32]
-        if not tag or tag in STOP_TAGS or len(tag) < 2 or tag in seen:
+        if not tag or tag in STOP_TAGS or len(tag) < 2 or tag in seen or _is_noise_token(tag):
             continue
         seen.add(tag)
         normalized.append(tag)
@@ -614,12 +718,19 @@ def _normalize_tags(values: Any) -> list[str]:
 
 
 def _clean_title(value: Any) -> str:
-    return " ".join(str(value or "").strip().split())[:160]
+    text = " ".join(str(value or "").strip().split())[:160]
+    text = re.sub(r"\b(?:\d{3,4}x\d{3,4}|\d{3,4}p|4k|8k|uhd|fhd|qhd)\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:wp\d+|img[_-]?\d+|dsc[_-]?\d+|pxl[_-]?\d+|mvimg[_-]?\d+|screenshot[_-]?\d+|photo[_-]?\d+|image[_-]?\d+)\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?<![a-zA-Z])\d{2,}(?![a-zA-Z])", "", text)
+    text = re.sub(r"\s+", " ", text).strip(" -_")
+    return text[:160]
 
 
 def _clean_label(value: Any) -> str | None:
     cleaned = " ".join(str(value or "").strip().split())[:80]
-    return cleaned or None
+    if not cleaned or _is_noise_token(cleaned):
+        return None
+    return cleaned
 
 
 def _clean_filename_base(value: Any) -> str:
@@ -628,15 +739,7 @@ def _clean_filename_base(value: Any) -> str:
     return cleaned[:90]
 
 
-def _suggest_filename(
-    *,
-    title: str,
-    source_filename: str,
-    mime_type: str,
-    category_name: str | None,
-    subcategory_name: str | None,
-    suggested_base: str = "",
-) -> str:
+def _suggest_filename(*, title: str, source_filename: str, mime_type: str, category_name: str | None, subcategory_name: str | None, suggested_base: str = "") -> str:
     suffix = Path(source_filename or "upload").suffix.lower()
     if not suffix:
         suffix = mimetypes.guess_extension(mime_type or "") or ""
@@ -663,11 +766,145 @@ def _looks_low_signal_name(filename: str) -> bool:
         return True
     if HEXISH_RE.fullmatch(compact):
         return True
-    if compact.isdigit() and len(compact) >= 6:
+    if compact.isdigit() and len(compact) >= 2:
         return True
     if re.fullmatch(r"[0-9a-f-]{16,}", lowered):
         return True
     return False
+
+
+
+def _is_noise_token(value: str | None) -> bool:
+    token = str(value or "").strip().lower().replace("_", "-")
+    if not token:
+        return True
+    compact = re.sub(r"[^a-z0-9]+", "", token)
+    if compact.isdigit() and len(compact) >= 2:
+        return True
+    if NOISE_TOKEN_RE.fullmatch(token) or NOISE_TOKEN_RE.fullmatch(compact):
+        return True
+    return False
+
+
+def _compact_label(value: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _title_is_category_or_subcategory(title: str | None, category_name: str | None, subcategory_name: str | None) -> bool:
+    compact_title = _compact_label(title)
+    if not compact_title:
+        return True
+    blocked = {
+        _compact_label(category_name),
+        _compact_label(subcategory_name),
+        _compact_label(str(category_name or "").replace("Backgrounds", "Background")),
+        _compact_label(str(category_name or "").replace("Pictures", "Picture")),
+    }
+    blocked.update({
+        "phonebackground",
+        "phonebackgrounds",
+        "desktopbackground",
+        "desktopbackgrounds",
+        "profile",
+        "profilepicture",
+        "profilepictures",
+        "wallpaper",
+        "wallpapers",
+        "background",
+        "backgrounds",
+        "image",
+        "images",
+        "artwork",
+        "media",
+    })
+    blocked.discard("")
+    return compact_title in blocked
+
+
+def _is_bad_subject_title(title: str | None, category_name: str | None, subcategory_name: str | None) -> bool:
+    if _is_generic_title(title):
+        return True
+    if _title_is_category_or_subcategory(title, category_name, subcategory_name):
+        return True
+    return False
+
+def _is_generic_title(value: str | None) -> bool:
+    original = " ".join(str(value or "").strip().split())
+    cleaned = _clean_title(original)
+    if not original or not cleaned:
+        return True
+    if _is_noise_token(original) or _is_noise_token(cleaned):
+        return True
+    if GENERIC_TITLE_RE.fullmatch(cleaned):
+        return True
+    lowered = cleaned.lower().strip()
+    if lowered in {"desktop backgrounds", "phone backgrounds", "wallpapers"}:
+        return True
+    parts = [p for p in re.split(r"\s+", lowered) if p]
+    meaningful = [p for p in parts if p not in STOP_TAGS and not _is_noise_token(p)]
+    return len(meaningful) <= 1
+
+
+def _category_suffix(category_name: str | None, media_kind: str) -> str:
+    if category_name == "Phone Backgrounds":
+        return "Phone Background"
+    if category_name == "Desktop Backgrounds":
+        return "Desktop Background"
+    if category_name == "Wallpapers":
+        return "Wallpaper"
+    if media_kind == "video":
+        return "Video"
+    return "Artwork"
+
+
+def _pretty_tag(tag: str) -> str:
+    text = str(tag or "").replace("_", " ").replace("-", " ")
+    words = [w for w in text.split() if w and w not in STOP_TAGS and not _is_noise_token(w)]
+    if not words:
+        return ""
+    return " ".join(w.upper() if w.lower() in {"mlp", "fnaf", "kpop", "vr", "sfm", "eqg", "ai", "4k"} else w.capitalize() for w in words)
+
+
+def _compose_specific_title(*, title: str, filename: str, category_name: str | None, subcategory_name: str | None, tags: list[str], media_kind: str) -> str:
+    clean_title = _clean_title(title)
+    if clean_title and not _is_bad_subject_title(clean_title, category_name, subcategory_name):
+        return clean_title[:160]
+
+    subject = _clean_label(subcategory_name)
+    if subject and not _is_bad_subject_title(subject, category_name, None):
+        base = f"{subject} {_category_suffix(category_name, media_kind)}"
+        return base[:160]
+
+    preferred_tags: list[str] = []
+    for tag in tags:
+        if tag in {"landscape", "portrait", "square", "1080p", "1440p", "4k", "video", "gif"}:
+            continue
+        pretty = _pretty_tag(tag)
+        if not pretty:
+            continue
+        if pretty.lower() in {"background", "backgrounds", "wallpaper", "wallpapers", "desktop", "phone"}:
+            continue
+        if pretty.lower() not in {p.lower() for p in preferred_tags}:
+            preferred_tags.append(pretty)
+        if len(preferred_tags) >= 2:
+            break
+
+    if preferred_tags:
+        if len(preferred_tags) >= 2:
+            base = f"{preferred_tags[0]} and {preferred_tags[1]} {_category_suffix(category_name, media_kind)}"
+        else:
+            base = f"{preferred_tags[0]} {_category_suffix(category_name, media_kind)}"
+        return base[:160]
+
+    # Do not fall back to numeric filename chunks. If the AI cannot name the subject,
+    # use an honest uncategorized visual title instead of showing file IDs like 0703.
+    if category_name in {"Phone Backgrounds", "Desktop Backgrounds", "Wallpapers", "Profile Pictures"}:
+        return f"Uncategorized {_category_suffix(category_name, media_kind)}"[:160]
+
+    fallback = category_name or ("Video" if media_kind == "video" else "Media")
+    if _title_is_category_or_subcategory(fallback, category_name, subcategory_name):
+        fallback = "Media"
+    return f"Uncategorized {fallback}"[:160]
 
 
 def _looks_adult(title: str, description: str, tags: list[str], filename: str, mime_type: str) -> bool:
@@ -678,7 +915,9 @@ def _looks_adult(title: str, description: str, tags: list[str], filename: str, m
         "explicit", "porn", "porno", "sex", "sexual", "hentai", "ecchi", "lewd",
         "erotic", "fetish", "onlyfans", "xxx",
     }
-    return any(word in normalized or word in combined for word in adult_keywords)
+    
+    # Use word boundaries to prevent 'sex' from flagging 'sussex' or 'sextant'
+    return any(re.search(rf"\b{re.escape(word)}\b", normalized) for word in adult_keywords)
 
 
 def _clamp_float(value: Any, minimum: float, maximum: float, default: float) -> float:
