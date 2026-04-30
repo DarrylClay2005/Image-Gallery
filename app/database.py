@@ -1985,12 +1985,30 @@ class GalleryDatabase:
                     LEFT JOIN media_items m ON m.user_id=u.id AND m.deleted_at IS NULL AND m.visibility='public'
                     LEFT JOIN user_follows f ON f.followed_id=u.id
                     LEFT JOIN user_follows mine ON mine.followed_id=u.id AND mine.follower_id=%s
-                    WHERE u.username LIKE %s OR u.display_name LIKE %s OR u.bio LIKE %s OR u.profile_headline LIKE %s
+                    WHERE u.username LIKE %s
+                       OR (CASE WHEN u.public_profile=1 OR u.id=%s THEN u.display_name ELSE NULL END) LIKE %s
+                       OR (CASE WHEN u.public_profile=1 OR u.id=%s THEN u.bio ELSE NULL END) LIKE %s
+                       OR (CASE WHEN u.public_profile=1 OR u.id=%s THEN u.profile_headline ELSE NULL END) LIKE %s
                     GROUP BY u.id
                     ORDER BY (u.username=%s) DESC, follower_count DESC, media_count DESC, u.created_at DESC
                     LIMIT %s
                     """,
-                    (viewer, viewer, viewer, viewer, viewer, needle, needle, needle, needle, query, max(1, min(limit, 60))),
+                    (
+                        viewer,
+                        viewer,
+                        viewer,
+                        viewer,
+                        viewer,
+                        needle,
+                        viewer,
+                        needle,
+                        viewer,
+                        needle,
+                        viewer,
+                        needle,
+                        query,
+                        max(1, min(limit, 60)),
+                    ),
                 )
                 users = []
                 for row in await cur.fetchall():

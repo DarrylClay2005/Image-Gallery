@@ -93,6 +93,11 @@ function safeEl(id) {
   return document.getElementById(id);
 }
 
+function galleryPageSize() {
+  const raw = Number(userSettings().items_per_page || GALLERY_PAGE_SIZE);
+  return Math.max(15, Math.min(raw || GALLERY_PAGE_SIZE, 60));
+}
+
 function on(id, eventName, handler) {
   const el = safeEl(id);
   if (el) el.addEventListener(eventName, handler);
@@ -1016,7 +1021,7 @@ function fillSettingsForm() {
   setValue("pref-accent-color", prefs.accent_color || "#37c9a7");
   setValue("pref-grid-density", prefs.grid_density || "comfortable");
   setValue("pref-default-sort", prefs.default_sort || "new");
-  setValue("pref-items-per-page", GALLERY_PAGE_SIZE);
+  setValue("pref-items-per-page", galleryPageSize());
   setValue("pref-profile-layout", prefs.profile_layout || "spotlight");
   setValue("pref-profile-banner-style", prefs.profile_banner_style || "gradient");
   setValue("pref-profile-card-style", prefs.profile_card_style || "glass");
@@ -1071,7 +1076,7 @@ async function submitSettings(event) {
       accent_color: $("pref-accent-color").value,
       grid_density: $("pref-grid-density").value,
       default_sort: $("pref-default-sort").value,
-      items_per_page: GALLERY_PAGE_SIZE,
+      items_per_page: Number($("pref-items-per-page").value || galleryPageSize()),
       profile_layout: $("pref-profile-layout").value,
       profile_banner_style: $("pref-profile-banner-style").value,
       profile_card_style: $("pref-profile-card-style").value,
@@ -1766,13 +1771,14 @@ async function loadMedia(page = galleryPage, { scrollToTop = false } = {}) {
   if (safeEl("date-to-filter")?.value) params.set("date_to", $("date-to-filter").value);
   if (safeEl("adult-filter")?.value && $("adult-filter").value !== "show") params.set("adult", $("adult-filter").value);
   params.set("sort", $("sort-filter").value);
-  params.set("limit", GALLERY_PAGE_SIZE + 1);
-  params.set("offset", (galleryPage - 1) * GALLERY_PAGE_SIZE);
+  const pageSize = galleryPageSize();
+  params.set("limit", pageSize + 1);
+  params.set("offset", (galleryPage - 1) * pageSize);
   try {
     const data = await apiFetch(`/api/media?${params}`);
     const rows = data.media || [];
-    galleryHasNext = rows.length > GALLERY_PAGE_SIZE;
-    mediaItems = rows.slice(0, GALLERY_PAGE_SIZE);
+    galleryHasNext = rows.length > pageSize;
+    mediaItems = rows.slice(0, pageSize);
     renderMediaGrid();
     if (scrollToTop) safeEl("gallery-grid")?.scrollIntoView({ behavior: userSettings().reduce_motion ? "auto" : "smooth", block: "start" });
   } catch (err) {
@@ -2068,7 +2074,7 @@ function renderMediaGrid() {
   grid.innerHTML = "";
   const visibleIds = new Set(mediaItems.map((item) => Number(item.id)));
   compareSelection = new Set(Array.from(compareSelection).filter((id) => visibleIds.has(Number(id))));
-  const start = mediaItems.length ? ((galleryPage - 1) * GALLERY_PAGE_SIZE) + 1 : 0;
+  const start = mediaItems.length ? ((galleryPage - 1) * galleryPageSize()) + 1 : 0;
   const end = start + mediaItems.length - 1;
   $("result-count").textContent = mediaItems.length
     ? `Page ${galleryPage} · showing ${start}-${end}${galleryHasNext ? "+" : ""}`
@@ -2524,14 +2530,15 @@ async function loadPagedFeed(path, mode, page = 1, { scrollToTop = false } = {})
   renderGallerySkeleton();
   updateGalleryPagination();
   const params = new URLSearchParams({
-    limit: String(GALLERY_PAGE_SIZE + 1),
-    offset: String((galleryPage - 1) * GALLERY_PAGE_SIZE),
+    limit: String(galleryPageSize() + 1),
+    offset: String((galleryPage - 1) * galleryPageSize()),
   });
   try {
     const data = await apiFetch(`${path}?${params}`);
     const rows = data.media || [];
-    galleryHasNext = rows.length > GALLERY_PAGE_SIZE;
-    mediaItems = rows.slice(0, GALLERY_PAGE_SIZE);
+    const pageSize = galleryPageSize();
+    galleryHasNext = rows.length > pageSize;
+    mediaItems = rows.slice(0, pageSize);
     renderMediaGrid();
     if (scrollToTop) safeEl("gallery-grid")?.scrollIntoView({ behavior: userSettings().reduce_motion ? "auto" : "smooth", block: "start" });
   } catch (err) {
@@ -2671,14 +2678,26 @@ async function sendFriendRequest(userId) {
 
 async function openProfile(username) {
   if (!username) return;
+  const previousUsername = activeProfileUsername;
+  const previousData = profilePageData;
   activeProfileUsername = username;
-  const data = await apiFetch(`/api/users/${encodeURIComponent(username)}/profile`);
-  profilePageData = data;
-  renderProfile(data);
-  if (location.hash !== `#user/${encodeURIComponent(username)}`) {
-    history.replaceState(null, "", `#user/${encodeURIComponent(username)}`);
+  try {
+    const data = await apiFetch(`/api/users/${encodeURIComponent(username)}/profile`);
+    profilePageData = data;
+    renderProfile(data);
+    if (location.hash !== `#user/${encodeURIComponent(username)}`) {
+      history.replaceState(null, "", `#user/${encodeURIComponent(username)}`);
+    }
+    setCurrentPage("profile");
+  } catch (err) {
+    activeProfileUsername = previousUsername;
+    profilePageData = previousData;
+    if (location.hash === `#user/${encodeURIComponent(username)}`) {
+      history.replaceState(null, "", location.pathname + location.search);
+    }
+    showToast(err.message || "Profile unavailable.", "error");
+    return null;
   }
-  setCurrentPage("profile");
 }
 
 function profileCustomizationMarkup(user) {
@@ -2841,7 +2860,7 @@ function renderProfile(data) {
         <button type="button" data-follow-user="${user.id}">${user.followed_by_me ? "Unfollow" : "Follow"}</button>
         <button type="button" data-friend-user="${user.id}" ${["self", "friends", "pending_out"].includes(user.friend_status) ? "disabled" : ""}>${friendButtonLabel(user.friend_status)}</button>
         <button type="button" data-copy-profile="${escapeHtml(user.username || "")}">Copy Link</button>
-        ${user.website_url ? `<a class="button-link" href="${escapeHtml(user.website_url)}" target="_blank" rel="noopener">Website</a>` : ""}
+        ${user.website_url ? `<a class="button-link" href="${safeUrl(user.website_url)}" target="_blank" rel="noopener">Website</a>` : ""}
       </div>
     </section>
     <section class="profile-stats">
@@ -2932,7 +2951,7 @@ function renderProfile(data) {
           <button type="button" data-follow-user="${user.id}">${user.followed_by_me ? "Unfollow" : "Follow"}</button>
           <button type="button" data-friend-user="${user.id}" ${["self", "friends", "pending_out"].includes(user.friend_status) ? "disabled" : ""}>${friendButtonLabel(user.friend_status)}</button>
           <button type="button" data-copy-profile="${escapeHtml(user.username || "")}">Copy Link</button>
-          ${user.website_url ? `<a class="button-link" href="${escapeHtml(user.website_url)}" target="_blank" rel="noopener">Website</a>` : ""}
+          ${user.website_url ? `<a class="button-link" href="${safeUrl(user.website_url)}" target="_blank" rel="noopener">Website</a>` : ""}
           ${currentUser?.username === user.username ? `<button type="button" data-profile-customize-toggle="1">${profileCustomizeOpen ? "Hide Controls" : "Customize Profile"}</button>` : ""}
         </div>
       </div>
@@ -4092,7 +4111,8 @@ async function boot() {
   startSilentChecks();
   window.addEventListener("hashchange", async () => {
     const hashProfile = decodeURIComponent(location.hash || "").match(/^#user\/(.+)/)?.[1];
-    if (hashProfile) await openProfile(hashProfile);
+    if (!hashProfile) return;
+    await openProfile(hashProfile);
   });
   const hasBackendConfig = await initApiOrigin();
   if (REMOTE_MODE && !hasBackendConfig) return;
