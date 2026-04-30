@@ -85,6 +85,7 @@ let profileCustomizeOpen = false;
 let friendPanelState = { incoming: [], outgoing: [], friends: [] };
 let studioPageState = { items: [], totals: { views: 0, downloads: 0, likes: 0 } };
 let siteBackgroundTimer = 0;
+let revealObserver = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -111,6 +112,65 @@ function showIfPresent(id, visible) {
 function setDisabledIfPresent(id, disabled) {
   const el = safeEl(id);
   if (el) el.disabled = Boolean(disabled);
+}
+
+function prefersReducedMotion() {
+  return document.body?.dataset.reduceMotion === "1" || window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+}
+
+function ensureRevealObserver() {
+  if (revealObserver || prefersReducedMotion() || typeof IntersectionObserver === "undefined") return revealObserver;
+  revealObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      entry.target.classList.add("is-visible");
+      revealObserver?.unobserve(entry.target);
+    }
+  }, { threshold: 0.16, rootMargin: "0px 0px -8% 0px" });
+  return revealObserver;
+}
+
+function motionTargets(root = document) {
+  if (!root?.querySelectorAll) return [];
+  return root.querySelectorAll([
+    ".discover-hero-shell",
+    ".page-hero",
+    ".sidebar-block",
+    ".stats-grid",
+    ".account-card",
+    ".sidebar-note",
+    ".media-card",
+    ".page-panel",
+    ".collection-card",
+    ".saved-view-card",
+    ".studio-item",
+    ".user-card",
+    ".profile-showcase",
+    ".profile-insight-card",
+    ".profile-section-card",
+    ".upload-queue-item",
+  ].join(","));
+}
+
+function enhanceMotion(root = document) {
+  const targets = Array.from(motionTargets(root));
+  if (!targets.length) return;
+  if (prefersReducedMotion()) {
+    targets.forEach((node) => {
+      node.classList.remove("reveal-ready");
+      node.classList.add("is-visible");
+      node.style.removeProperty("--reveal-delay");
+    });
+    return;
+  }
+  const observer = ensureRevealObserver();
+  targets.forEach((node, index) => {
+    if (node.dataset.motionReady === "1") return;
+    node.dataset.motionReady = "1";
+    node.classList.add("reveal-ready");
+    node.style.setProperty("--reveal-delay", `${Math.min(index, 10) * 36}ms`);
+    observer?.observe(node);
+  });
 }
 
 function showToast(message, kind = "info") {
@@ -754,10 +814,15 @@ function renderPageSidebar() {
   const discoverSidebar = document.querySelectorAll(".discover-sidebar-block");
   const discoverVisible = ["discover", "following", "liked"].includes(currentPage);
   discoverSidebar.forEach((node) => { node.hidden = !discoverVisible; });
+  enhanceMotion(document);
   if (!pageSidebar) return;
+  const commitSidebar = (markup = "") => {
+    pageSidebar.innerHTML = markup;
+    enhanceMotion(pageSidebar);
+  };
   if (discoverVisible) {
     const meta = galleryHeadingMeta();
-    pageSidebar.innerHTML = `
+    commitSidebar(`
       <section class="sidebar-note">
         <h3>${escapeHtml(meta.title)}</h3>
         <p class="muted">${escapeHtml(meta.description)}</p>
@@ -766,11 +831,11 @@ function renderPageSidebar() {
         <h3>Quick Status</h3>
         <p class="muted">${escapeHtml(latestLiveSnapshot?.media_active ? `${latestLiveSnapshot.media_active} active posts reported by the backend.` : "Run Checks if the gallery feels stale or partially loaded.")}</p>
       </section>
-    `;
+    `);
     return;
   }
   if (currentPage === "collections") {
-    pageSidebar.innerHTML = `
+    commitSidebar(`
       <section class="sidebar-note">
         <h3>${collectionsMineMode ? "My Collections" : "Community Collections"}</h3>
         <p class="muted">${collectionsMineMode ? "Private and public sets you own appear here with editing space beside them." : "Browse public sets, pick one, and inspect its media rail without leaving the page."}</p>
@@ -779,39 +844,39 @@ function renderPageSidebar() {
         <h3>Loaded</h3>
         <p class="muted">${collectionsState.length} collection${collectionsState.length === 1 ? "" : "s"} currently loaded.</p>
       </section>
-    `;
+    `);
     return;
   }
   if (currentPage === "users") {
-    pageSidebar.innerHTML = `
+    commitSidebar(`
       <section class="sidebar-note">
         <h3>Directory Tips</h3>
         <p class="muted">Search by username, display name, bio, or profile headline. Open any profile inline from the results grid.</p>
       </section>
-    `;
+    `);
     return;
   }
   if (currentPage === "friends") {
-    pageSidebar.innerHTML = `
+    commitSidebar(`
       <section class="sidebar-note">
         <h3>Relationship Snapshot</h3>
         <p class="muted">${friendPanelState.friends.length} friends, ${friendPanelState.incoming.length} incoming request${friendPanelState.incoming.length === 1 ? "" : "s"}, ${friendPanelState.outgoing.length} outgoing.</p>
       </section>
-    `;
+    `);
     return;
   }
   if (currentPage === "studio") {
-    pageSidebar.innerHTML = `
+    commitSidebar(`
       <section class="sidebar-note">
         <h3>Creator Totals</h3>
         <p class="muted">${studioPageState.items.length} posts, ${studioPageState.totals.views} views, ${studioPageState.totals.downloads} downloads, ${studioPageState.totals.likes} likes.</p>
       </section>
-    `;
+    `);
     return;
   }
   if (currentPage === "profile") {
     const user = profilePageData?.user || {};
-    pageSidebar.innerHTML = `
+    commitSidebar(`
       <section class="sidebar-note">
         <h3>${escapeHtml(user.display_name || user.username || "Profile")}</h3>
         <p class="muted">${escapeHtml(user.profile_headline || user.bio || "Expanded profile view with layout and banner styling.")}</p>
@@ -820,10 +885,10 @@ function renderPageSidebar() {
         <h3>Public Stats</h3>
         <p class="muted">${Number(user.media_count || 0)} posts, ${Number(user.follower_count || 0)} followers, ${Number(user.friend_count || 0)} friends.</p>
       </section>
-    `;
+    `);
     return;
   }
-  pageSidebar.innerHTML = "";
+  commitSidebar("");
 }
 
 function renderTopbarPageState() {
@@ -869,6 +934,7 @@ function setCurrentPage(page) {
   renderGalleryHeading();
   renderTopbarPageState();
   renderPageSidebar();
+  enhanceMotion(safeEl(`${page}-page`) || document);
 }
 
 
@@ -1561,6 +1627,7 @@ function renderSavedViews() {
       </div>
     </article>
   `).join("") : `<p class="muted">No saved views yet. Save a filter setup to jump back to it later.</p>`;
+  enhanceMotion(list);
 }
 
 function openSavedViewsDialog() {
@@ -1665,6 +1732,7 @@ function renderGallerySkeleton(count = 8) {
       </div>
     </article>
   `).join("");
+  enhanceMotion(grid);
 }
 
 async function loadMedia(page = galleryPage, { scrollToTop = false } = {}) {
@@ -2059,6 +2127,7 @@ function renderMediaGrid() {
     grid.appendChild(card);
   }
   updateCompareUi();
+  enhanceMotion(grid);
 }
 
 async function loadCurrentGalleryPage(page = galleryPage, options = {}) {
@@ -2226,6 +2295,9 @@ function renderCollections() {
   }
   showIfPresent("collections-page-form", Boolean(currentUser) && collectionsMineMode);
   renderPageSidebar();
+  enhanceMotion(safeEl("collections-list"));
+  enhanceMotion(safeEl("collections-page-list"));
+  enhanceMotion(safeEl("collections-page"));
 }
 
 function collectionDetailMarkup(collection, media) {
@@ -2368,6 +2440,8 @@ async function openStudio() {
   if (safeEl("studio-page-list")) $("studio-page-list").innerHTML = markup;
   setCurrentPage("studio");
   renderPageSidebar();
+  enhanceMotion(safeEl("studio-page"));
+  enhanceMotion(safeEl("studio-dialog"));
 }
 
 async function editOwnMedia(id) {
@@ -2560,6 +2634,8 @@ async function searchUsers() {
     if (mirror) mirror.innerHTML = markup;
   }
   renderPageSidebar();
+  if (list) enhanceMotion(list);
+  if (mirror) enhanceMotion(mirror);
 }
 
 async function toggleFollowUser(userId, following = null) {
@@ -2878,6 +2954,8 @@ function renderProfile(data) {
   if (safeEl("profile-view")) $("profile-view").innerHTML = compactMarkup;
   if (safeEl("profile-page-view")) $("profile-page-view").innerHTML = expandedMarkup;
   renderPageSidebar();
+  enhanceMotion(safeEl("profile-view"));
+  enhanceMotion(safeEl("profile-page-view"));
 }
 
 async function openFriendsPage() {
@@ -2936,6 +3014,8 @@ async function loadFriendPanel() {
   setTextIfPresent("friends-page-outgoing-count", outgoing.length);
   setTextIfPresent("friends-page-list-count", (friends.friends || []).length);
   renderPageSidebar();
+  enhanceMotion(safeEl("friends-dialog"));
+  enhanceMotion(safeEl("friends-page"));
 }
 
 async function respondFriendRequest(requestId, action) {
@@ -3169,6 +3249,7 @@ function renderUploadAiPreview(analysis) {
       <span>${escapeHtml(`Confidence ${Math.round(Number(analysis.confidence || 0) * 100)}%${analysis.is_adult ? " · 18+" : ""}`)}</span>
     </div>
   `;
+  enhanceMotion(preview);
 }
 
 function applyUploadAnalysis(analysis) {
@@ -3289,6 +3370,7 @@ function renderUploadQueue(activeIndex = -1, statuses = []) {
       </div>
     `;
   }).join("");
+  enhanceMotion(queue);
 }
 
 function openSettingsPanel() {
@@ -4001,6 +4083,7 @@ async function boot() {
   setCurrentPage("discover");
   renderAuth();
   updateCompareUi();
+  enhanceMotion(document);
   startSilentChecks();
   window.addEventListener("hashchange", async () => {
     const hashProfile = decodeURIComponent(location.hash || "").match(/^#user\/(.+)/)?.[1];
