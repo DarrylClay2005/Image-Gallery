@@ -4177,3 +4177,67 @@ async function boot() {
 }
 
 boot();
+
+// =====================================================================
+// 2026 UI/UX Revamp helpers: no API changes, visual state only.
+// =====================================================================
+(function installImageGalleryUxRevamp() {
+  const ready = () => {
+    if (!document.body || document.body.dataset.uxRevamp === 'ready') return;
+    document.body.dataset.uxRevamp = 'ready';
+    document.body.classList.add('ux-revamp-ready');
+
+    const topbarButtons = Array.from(document.querySelectorAll('.topbar-actions button'));
+    const pageButtonMap = new Map([
+      ['discover-open', 'discover-page'], ['collections-open', 'collections-page'], ['users-open', 'users-page'],
+      ['friends-open', 'friends-page'], ['studio-open', 'studio-page'], ['profile-open', 'profile-page'],
+      ['following-feed', 'discover-page'], ['liked-feed', 'discover-page'], ['live-checks-open', 'discover-page']
+    ]);
+
+    const markActiveNavigation = () => {
+      let visiblePageId = '';
+      document.querySelectorAll('.app-page').forEach((page) => {
+        if (!page.hidden && getComputedStyle(page).display !== 'none') visiblePageId = page.id;
+      });
+      topbarButtons.forEach((button) => {
+        const isActive = pageButtonMap.get(button.id) === visiblePageId;
+        button.classList.toggle('is-active', isActive);
+        if (isActive) button.setAttribute('aria-current', 'page');
+        else button.removeAttribute('aria-current');
+      });
+    };
+
+    topbarButtons.forEach((button) => button.addEventListener('click', () => setTimeout(markActiveNavigation, 50), { passive: true }));
+    markActiveNavigation();
+    setInterval(markActiveNavigation, 1500);
+
+    if ('IntersectionObserver' in window && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      const seen = new WeakSet();
+      const observer = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return;
+          entry.target.classList.add('ux-visible');
+          observer.unobserve(entry.target);
+        });
+      }, { threshold: 0.08, rootMargin: '0px 0px -5% 0px' });
+      const scan = () => document.querySelectorAll('.media-card, .collection-card, .user-card, .studio-item, .saved-view-card, .page-panel').forEach((el) => {
+        if (seen.has(el)) return;
+        seen.add(el);
+        el.classList.add('ux-reveal');
+        observer.observe(el);
+      });
+      scan();
+      new MutationObserver(scan).observe(document.body, { childList: true, subtree: true });
+    }
+
+    document.addEventListener('keydown', (event) => {
+      const tag = document.activeElement?.tagName?.toLowerCase();
+      if (event.key === '/' && !event.metaKey && !event.ctrlKey && !['input', 'textarea', 'select'].includes(tag)) {
+        const search = document.getElementById('search');
+        if (search) { event.preventDefault(); search.focus(); search.select?.(); }
+      }
+    });
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ready, { once: true });
+  else ready();
+})();
