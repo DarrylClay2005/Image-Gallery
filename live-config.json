@@ -1,6 +1,6 @@
 {
-  "gallery_url": "https://holmes-feel-garlic-superb.trycloudflare.com",
-  "status": "live",
+  "gallery_url": "",
+  "status": "offline",
   "local_urls": ["http://127.0.0.1:8788", "http://localhost:8788", "http://192.168.12.188:8788"],
-  "updated_at": "2026-04-29T20:08:27-05:00"
+  "updated_at": "2026-04-29T20:25:27-05:00"
 }
