@@ -1,6 +1,6 @@
 {
-  "gallery_url": "",
-  "status": "offline",
+  "gallery_url": "https://what-nano-athletics-efforts.trycloudflare.com",
+  "status": "live",
   "local_urls": ["http://127.0.0.1:8788", "http://localhost:8788", "http://192.168.12.188:8788"],
-  "updated_at": "2026-04-29T20:37:02-05:00"
+  "updated_at": "2026-04-29T20:37:07-05:00"
 }
