@@ -64,7 +64,7 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    pages_url = _env("GALLERY_PAGES_PUBLIC_URL", "https://darrylclay2005.github.io/Image-Gallery/")
+    pages_url = _env("GALLERY_PAGES_PUBLIC_URL", "https://heavenlyxenusvr.github.io/Image-Gallery/")
     ai_api_key = _env("GALLERY_AI_API_KEY") or _env("OPENAI_API_KEY")
     ai_enabled_raw = _env("GALLERY_AI_ENABLED", "true" if ai_api_key else "false")
     return Settings(
