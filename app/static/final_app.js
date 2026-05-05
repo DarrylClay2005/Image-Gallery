@@ -708,20 +708,24 @@ function adultBadge(item) {
   return `<span class="adult-badge">18+</span>`;
 }
 
+function analysisSourceLabel(source) {
+  return source === "openai" || source === "ollama" || source === "local-clip" ? "AI" : "Smart fallback";
+}
+
 function renderPreview(item, size = "card") {
   const isAdult = Boolean(item.is_adult);
   const revealed = revealedAdultMedia.has(Number(item.id));
   const locked = isAdult && !canRevealAdult(item);
   const blur = isAdult && !revealed && !locked;
   const placeholderText = locked ? "18+ Verify Age" : "Click To Reveal";
-  const previewUrl = normalizedPublicUrl(item.url);
+  const previewUrl = normalizedPublicUrl(item.media_kind === "image" ? (item.preview_url || item.url) : item.url);
   const body = locked
     ? `<div class="locked-preview"><strong>18+</strong><span>Verify age to view</span></div>`
     : !previewUrl
       ? `<div class="locked-preview"><strong>Preview unavailable</strong><span>Open the post for details</span></div>`
     : item.media_kind === "video"
       ? `<video src="${escapeHtml(previewUrl)}" ${userSettings().muted_previews ? "muted" : ""} ${userSettings().autoplay_previews ? "autoplay loop" : ""} playsinline preload="metadata"></video>`
-      : `<img src="${escapeHtml(previewUrl)}" alt="${escapeHtml(item.title)}" loading="${size === "card" ? "lazy" : "eager"}" />`;
+      : `<img src="${escapeHtml(previewUrl)}" alt="${escapeHtml(item.title)}" loading="${size === "card" ? "lazy" : "eager"}" decoding="async" fetchpriority="${size === "card" ? "low" : "auto"}" />`;
   return `
     <span class="${blur ? "adult-blur" : ""}">${body}</span>
     ${isAdult && !revealed ? `<span class="adult-overlay">${placeholderText}</span>` : ""}
@@ -3355,7 +3359,7 @@ function applyUploadAnalysis(analysis) {
   renderUploadAiPreview(analysis);
   setTextIfPresent(
     "upload-ai-status",
-    `${analysis.source === "openai" ? "AI" : "Smart fallback"} suggested ${categoryDisplayName(analysis.category_name, analysis.subcategory_name)} and ${Math.max(0, (analysis.tags || []).length)} tag${(analysis.tags || []).length === 1 ? "" : "s"}.`,
+    `${analysisSourceLabel(analysis.source)} suggested ${categoryDisplayName(analysis.category_name, analysis.subcategory_name)} and ${Math.max(0, (analysis.tags || []).length)} tag${(analysis.tags || []).length === 1 ? "" : "s"}.`,
   );
   checkUploadReadiness();
 }
@@ -3389,7 +3393,7 @@ async function analyzeUploadSelection({ apply = true, silent = false } = {}) {
     if (!apply) {
       setTextIfPresent(
         "upload-ai-status",
-        `${uploadAiAnalysis.source === "openai" ? "AI" : "Smart fallback"} preview ready for ${file.name}.`,
+        `${analysisSourceLabel(uploadAiAnalysis.source)} preview ready for ${file.name}.`,
       );
     }
   } catch (err) {

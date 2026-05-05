@@ -9,6 +9,7 @@ FastAPI and MySQL gallery for wallpapers, profile pictures, memes, GIFs, and vid
 - Browse by media type, category, search text, newest, likes, or downloads.
 - Like posts, comment on posts, copy direct media addresses, and download files.
 - Uploaders can mark posts as 18+, and automatic moderation flags likely adult uploads from filenames, titles, descriptions, tags, and MIME metadata.
+- Smart image identification can run against a free local Ollama vision model for subject, franchise, and character tagging during upload.
 - 18+ posts require account age verification; previews stay blurred or locked until a verified user chooses to reveal them.
 - Private per-account settings for theme, accent color, grid density, default sort, preview behavior, reduced motion, and original-link behavior.
 - Public profile controls for circular avatar, display name, bio, website, location label, profile color, and profile visibility.
@@ -37,6 +38,15 @@ python3 -m venv .venv
 ```
 
 Open `http://127.0.0.1:8788`.
+
+For free local vision-based smart identify, run Ollama and set:
+
+```bash
+GALLERY_AI_ENABLED=true
+GALLERY_AI_PROVIDER=ollama
+GALLERY_OLLAMA_BASE_URL=http://127.0.0.1:11434
+GALLERY_OLLAMA_MODEL=qwen2.5vl:7b
+```
 
 ## Live GitHub Pages Backend
 ```bash

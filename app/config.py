@@ -20,6 +20,17 @@ def _env_csv(name: str) -> list[str]:
     return [item.strip().rstrip("/") for item in _env(name).split(",") if item.strip()]
 
 
+def _ai_provider(ai_api_key: str) -> str:
+    preferred = _env("GALLERY_AI_PROVIDER")
+    if preferred:
+        normalized = preferred.lower()
+        if normalized in {"openai", "ollama"}:
+            return normalized
+    if _env("GALLERY_OLLAMA_MODEL") or _env("GALLERY_OLLAMA_BASE_URL"):
+        return "ollama"
+    return "openai" if ai_api_key else "ollama"
+
+
 def _db_host() -> str:
     explicit = _env("GALLERY_DB_HOST")
     if explicit:
@@ -57,16 +68,29 @@ class Settings:
     smtp_from_email: str
     smtp_use_tls: bool
     ai_enabled: bool
+    ai_provider: str
     ai_api_key: str
     ai_base_url: str
     ai_model: str
+    ollama_base_url: str
+    ollama_model: str
     ai_timeout_seconds: int
+
+    @property
+    def active_ai_base_url(self) -> str:
+        return self.ollama_base_url if self.ai_provider == "ollama" else self.ai_base_url
+
+    @property
+    def active_ai_model(self) -> str:
+        return self.ollama_model if self.ai_provider == "ollama" else self.ai_model
 
 
 def load_settings() -> Settings:
     pages_url = _env("GALLERY_PAGES_PUBLIC_URL", "https://heavenlyxenusvr.github.io/Image-Gallery/")
     ai_api_key = _env("GALLERY_AI_API_KEY") or _env("OPENAI_API_KEY")
-    ai_enabled_raw = _env("GALLERY_AI_ENABLED", "true" if ai_api_key else "false")
+    ai_provider = _ai_provider(ai_api_key)
+    ai_enabled_default = "true" if (ai_api_key or ai_provider == "ollama" or _env("GALLERY_OLLAMA_MODEL")) else "false"
+    ai_enabled_raw = _env("GALLERY_AI_ENABLED", ai_enabled_default)
     return Settings(
         db_host=_db_host(),
         db_port=int(_env("GALLERY_DB_PORT", "3306")),
@@ -88,8 +112,11 @@ def load_settings() -> Settings:
         smtp_from_email=_env("GALLERY_SMTP_FROM_EMAIL") or _env("SMTP_FROM_EMAIL") or _env("GALLERY_SMTP_USERNAME") or _env("SMTP_USERNAME"),
         smtp_use_tls=(_env("GALLERY_SMTP_USE_TLS") or _env("SMTP_USE_TLS") or "true").lower() not in {"0", "false", "no", "off"},
         ai_enabled=ai_enabled_raw.lower() not in {"0", "false", "no", "off"},
+        ai_provider=ai_provider,
         ai_api_key=ai_api_key,
         ai_base_url=(_env("GALLERY_AI_BASE_URL") or _env("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/"),
         ai_model=_env("GALLERY_AI_MODEL", "gpt-5.4-nano"),
+        ollama_base_url=(_env("GALLERY_OLLAMA_BASE_URL", "http://127.0.0.1:11434")).rstrip("/"),
+        ollama_model=_env("GALLERY_OLLAMA_MODEL", "qwen2.5vl:7b"),
         ai_timeout_seconds=max(10, int(_env("GALLERY_AI_TIMEOUT_SECONDS", "45"))),
     )

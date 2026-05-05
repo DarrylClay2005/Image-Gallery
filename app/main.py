@@ -1,4 +1,5 @@
 import asyncio
+import io
 import logging
 import mimetypes
 import html
@@ -10,6 +11,7 @@ import hmac
 import random
 import struct
 import time
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 from decimal import Decimal
@@ -47,8 +49,10 @@ SITE_OWNER_EMAIL = "heavenlyxenusvr@icloud.com"
 BACKGROUND_ASPECT_RATIO = 16 / 9
 BACKGROUND_ASPECT_TOLERANCE = 0.035
 BACKGROUND_CACHE_SECONDS = 300
+PREVIEW_CACHE_MAX_ITEMS = 256
 _background_cache_lock = asyncio.Lock()
 _background_cache: dict[str, Any] = {"built_at": 0.0, "items": []}
+_preview_cache: OrderedDict[tuple[str, str], tuple[bytes, str]] = OrderedDict()
 
 
 class RegisterRequest(BaseModel):
@@ -253,6 +257,10 @@ def _public_url(request: Request, storage_path: str, media_id: int | None = None
     return str(request.url_for("serve_legacy_upload", path=storage_path))
 
 
+def _preview_url(request: Request, media_id: int) -> str:
+    return str(request.url_for("serve_media_preview", media_id=media_id))
+
+
 def _media_access_token(media_id: int) -> str:
     msg = str(int(media_id)).encode("utf-8")
     return hmac.new(settings.session_secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
@@ -278,6 +286,83 @@ def _legacy_upload_path(storage_path: str | None) -> Path | None:
     except ValueError:
         return None
     return path if path.is_file() else None
+
+
+def _normalized_preview_size(size: str | None) -> str:
+    normalized = str(size or "card").strip().lower()
+    return normalized if normalized in {"mini", "card", "detail"} else "card"
+
+
+def _preview_options(size: str | None) -> tuple[str, int, int]:
+    normalized = _normalized_preview_size(size)
+    if normalized == "mini":
+        return normalized, 420, 74
+    if normalized == "detail":
+        return normalized, 1600, 88
+    return normalized, 960, 82
+
+
+def _preview_etag(digest: str, size: str | None) -> str:
+    return f"\"{digest}:{_normalized_preview_size(size)}\""
+
+
+def _etag_matches(request: Request, etag: str) -> bool:
+    raw = request.headers.get("if-none-match", "")
+    if not raw:
+        return False
+    candidates = {part.strip() for part in raw.split(",") if part.strip()}
+    return "*" in candidates or etag in candidates
+
+
+def _cached_preview(cache_key: tuple[str, str]) -> tuple[bytes, str] | None:
+    cached = _preview_cache.get(cache_key)
+    if cached is None:
+        return None
+    _preview_cache.move_to_end(cache_key)
+    return cached
+
+
+def _store_preview(cache_key: tuple[str, str], payload: tuple[bytes, str]) -> tuple[bytes, str]:
+    _preview_cache[cache_key] = payload
+    _preview_cache.move_to_end(cache_key)
+    while len(_preview_cache) > PREVIEW_CACHE_MAX_ITEMS:
+        _preview_cache.popitem(last=False)
+    return payload
+
+
+def _render_image_preview(content: bytes, mime_type: str | None, digest: str, *, size: str | None) -> tuple[bytes, str]:
+    variant, max_edge, quality = _preview_options(size)
+    cache_key = (digest, variant)
+    cached = _cached_preview(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        from PIL import Image, ImageOps, ImageSequence
+
+        Image.MAX_IMAGE_PIXELS = None
+        resampling = getattr(Image, "Resampling", Image)
+        with Image.open(io.BytesIO(content)) as image:
+            frame = next(ImageSequence.Iterator(image), image)
+            preview = ImageOps.exif_transpose(frame)
+            has_alpha = "A" in preview.getbands()
+            preview = preview.convert("RGBA" if has_alpha else "RGB")
+            if max(preview.size) > max_edge:
+                preview.thumbnail((max_edge, max_edge), resample=resampling.LANCZOS)
+            output = io.BytesIO()
+            try:
+                preview.save(output, format="WEBP", quality=quality, method=6)
+                preview_bytes = output.getvalue()
+                if len(content) <= len(preview_bytes) and len(content) <= 1_500_000 and (mime_type or "").startswith("image/"):
+                    return _store_preview(cache_key, (content, mime_type or "image/jpeg"))
+                return _store_preview(cache_key, (preview_bytes, "image/webp"))
+            except OSError:
+                output = io.BytesIO()
+                preview.convert("RGB").save(output, format="JPEG", quality=min(quality + 4, 92), optimize=True)
+                preview_bytes = output.getvalue()
+                return _store_preview(cache_key, (preview_bytes, "image/jpeg"))
+    except Exception:
+        return _store_preview(cache_key, (content, mime_type or "application/octet-stream"))
 
 
 def _is_widescreen_background(width: int, height: int) -> bool:
@@ -468,14 +553,17 @@ def _with_urls(request: Request, item: dict[str, Any] | None, adult_allowed: boo
     if locked:
         clone.pop("storage_path", None)
         clone["url"] = None
+        clone["preview_url"] = None
         clone["download_url"] = None
     else:
         media_id = int(clone["id"])
         clone["url"] = _public_url(request, clone.get("storage_path", ""), media_id)
+        clone["preview_url"] = _preview_url(request, media_id) if clone.get("media_kind") == "image" else clone["url"]
         clone["download_url"] = str(request.url_for("download_media", media_id=media_id))
         if clone.get("is_adult") and adult_allowed:
             token = _media_access_token(media_id)
             clone["url"] = _append_query(clone["url"], "access", token)
+            clone["preview_url"] = _append_query(clone["preview_url"], "access", token)
             clone["download_url"] = _append_query(clone["download_url"], "access", token)
     if clone.get("user_avatar_path"):
         clone["user_avatar_url"] = str(request.url_for("serve_user_avatar", user_id=clone.get("user_id") or clone.get("id")))
@@ -1278,8 +1366,8 @@ async def upload_media(
         tags_hint=_parse_tags(tags),
         ai_enabled=auto_ai and settings.ai_enabled,
         ai_api_key=settings.ai_api_key,
-        ai_base_url=settings.ai_base_url,
-        ai_model=settings.ai_model,
+        ai_base_url=settings.active_ai_base_url,
+        ai_model=settings.active_ai_model,
         ai_timeout_seconds=settings.ai_timeout_seconds,
     )
     title = " ".join((title or analysis.title).strip().split())[:160]
@@ -1382,8 +1470,8 @@ async def analyze_media_upload(
         tags_hint=_parse_tags(tags),
         ai_enabled=settings.ai_enabled,
         ai_api_key=settings.ai_api_key,
-        ai_base_url=settings.ai_base_url,
-        ai_model=settings.ai_model,
+        ai_base_url=settings.active_ai_base_url,
+        ai_model=settings.active_ai_model,
         ai_timeout_seconds=settings.ai_timeout_seconds,
     )
     return {
@@ -1575,6 +1663,54 @@ async def _serve_media_content(media_id: int, request: Request, *, access: str |
 @app.get("/api/media/{media_id}/file", name="serve_media_file")
 async def serve_media_file(media_id: int, request: Request, access: str | None = None) -> Response:
     return await _serve_media_content(media_id, request, access=access, as_download=False)
+
+
+@app.get("/api/media/{media_id}/preview", name="serve_media_preview")
+async def serve_media_preview(media_id: int, request: Request, access: str | None = None, size: str = "card") -> Response:
+    auth = _auth_optional(request)
+    viewer_id = _user_id(auth)
+    item = await db.get_media(media_id, viewer_id)
+    if not item or item.get("deleted_at"):
+        raise HTTPException(status_code=404, detail="Media not found.")
+    owner = int(item.get("user_id")) == int(viewer_id or 0)
+    if item.get("visibility") == "private" and not owner:
+        raise HTTPException(status_code=403, detail="This post is private.")
+    if item.get("is_adult") and not await _adult_file_allowed(request, media_id, access):
+        raise HTTPException(status_code=403, detail="Age verification required for this 18+ post.")
+    if item.get("media_kind") != "image":
+        return await _serve_media_content(media_id, request, access=access, as_download=False)
+
+    file_row = await db.get_media_file(media_id)
+    if file_row:
+        digest = hashlib.sha256(file_row["content"]).hexdigest()
+        if digest != file_row["sha256"]:
+            raise HTTPException(status_code=500, detail="Stored file failed hash verification.")
+        etag = _preview_etag(digest, size)
+        headers = {"Cache-Control": "public, max-age=86400", "ETag": etag, "X-Content-SHA256": digest}
+        if _etag_matches(request, etag):
+            return Response(status_code=304, headers=headers)
+        preview_bytes, preview_mime = _render_image_preview(file_row["content"], file_row["mime_type"], digest, size=size)
+        return Response(content=preview_bytes, media_type=preview_mime, headers=headers)
+
+    legacy = _legacy_upload_path(item.get("storage_path"))
+    if not legacy:
+        raise HTTPException(
+            status_code=404,
+            detail="Preview is missing. Re-upload this post once so it can be saved into the new DB-backed file store.",
+        )
+    content = legacy.read_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    etag = _preview_etag(digest, size)
+    headers = {"Cache-Control": "public, max-age=86400", "ETag": etag, "X-Content-SHA256": digest}
+    if _etag_matches(request, etag):
+        return Response(status_code=304, headers=headers)
+    preview_bytes, preview_mime = _render_image_preview(
+        content,
+        item.get("mime_type") or mimetypes.guess_type(str(legacy))[0] or "image/jpeg",
+        digest,
+        size=size,
+    )
+    return Response(content=preview_bytes, media_type=preview_mime, headers=headers)
 
 
 @app.get("/api/users/{user_id}/avatar", name="serve_user_avatar")

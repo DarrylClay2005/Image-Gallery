@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -60,6 +61,7 @@ KNOWN_CATEGORIES = [
     "Phone Backgrounds",
     "Wallpapers",
 ]
+VISION_BACKOFF: dict[str, float] = {}
 
 
 @dataclass
@@ -148,8 +150,11 @@ def analyze_media_bytes(
     )
 
     provider = str(os.getenv("GALLERY_AI_PROVIDER", "")).strip().lower()
+    if provider not in {"ollama", "openai"}:
+        provider = "ollama" if (os.getenv("GALLERY_OLLAMA_MODEL") or os.getenv("GALLERY_OLLAMA_BASE_URL")) else "openai"
     enabled_default = bool(
         os.getenv("GALLERY_OLLAMA_MODEL")
+        or os.getenv("GALLERY_OLLAMA_BASE_URL")
         or ai_model
         or ai_api_key
         or os.getenv("GALLERY_AI_API_KEY")
@@ -164,11 +169,33 @@ def analyze_media_bytes(
         return fallback
 
     timeout_seconds = max(10, int(ai_timeout_seconds or os.getenv("GALLERY_AI_TIMEOUT_SECONDS") or 45))
+    backoff_seconds = max(30, int(os.getenv("GALLERY_VISION_BACKOFF_SECONDS", "600")))
+    local_clip_result = None
+
+    if provider == "ollama":
+        failed_at = VISION_BACKOFF.get("ollama", 0.0)
+        if failed_at and (time.time() - failed_at) < backoff_seconds:
+            local_clip_result = _local_clip_analysis(
+                content=content,
+                filename=filename,
+                mime_type=mime_type,
+                media_kind=media_kind,
+                fallback=fallback,
+            )
+            if local_clip_result:
+                local_clip_result["reason"] = "Local CLIP fallback used while Ollama vision is cooling down after a recent failure."
+                return _merge_analysis(
+                    ai_result=local_clip_result,
+                    fallback=fallback,
+                    filename=filename,
+                    mime_type=mime_type,
+                    media_kind=media_kind,
+                )
 
     try:
         if provider == "ollama" or os.getenv("GALLERY_OLLAMA_MODEL"):
-            model = str(ai_model or os.getenv("GALLERY_OLLAMA_MODEL") or "qwen2.5vl:3b").strip()
-            base_url = str(ai_base_url or os.getenv("GALLERY_OLLAMA_BASE_URL") or "http://127.0.0.1:11434").rstrip("/")
+            model = str(os.getenv("GALLERY_OLLAMA_MODEL") or ai_model or "qwen2.5vl:7b").strip()
+            base_url = str(os.getenv("GALLERY_OLLAMA_BASE_URL") or ai_base_url or "http://127.0.0.1:11434").rstrip("/")
             ai_result = _ollama_vision_analysis(
                 preview_image_b64=preview_image_b64,
                 filename=filename,
@@ -182,6 +209,7 @@ def analyze_media_bytes(
                 model=model,
                 timeout_seconds=timeout_seconds,
             )
+            VISION_BACKOFF.pop("ollama", None)
         else:
             api_key = str(ai_api_key or os.getenv("GALLERY_AI_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
             if not api_key:
@@ -204,6 +232,24 @@ def analyze_media_bytes(
                 timeout_seconds=timeout_seconds,
             )
     except Exception as exc:
+        if provider == "ollama":
+            VISION_BACKOFF["ollama"] = time.time()
+        local_clip_result = local_clip_result or _local_clip_analysis(
+            content=content,
+            filename=filename,
+            mime_type=mime_type,
+            media_kind=media_kind,
+            fallback=fallback,
+        )
+        if local_clip_result:
+            local_clip_result["reason"] = f"{local_clip_result.get('reason') or 'Local CLIP fallback used.'} Primary AI unavailable: {exc}"
+            return _merge_analysis(
+                ai_result=local_clip_result,
+                fallback=fallback,
+                filename=filename,
+                mime_type=mime_type,
+                media_kind=media_kind,
+            )
         fallback.reason = f"AI suggestion unavailable, using local analyzer: {exc}"
         return fallback
 
@@ -340,7 +386,13 @@ def _merge_analysis(
         subcategory_name=subcategory_name,
         suggested_base=_clean_filename_base(ai_result.get("suggested_filename_base")),
     )
-    source = "ollama" if (os.getenv("GALLERY_AI_PROVIDER", "").strip().lower() == "ollama" or os.getenv("GALLERY_OLLAMA_MODEL")) and confidence >= 0.45 else ("openai" if confidence >= 0.45 else fallback.source)
+    inferred_source = _clean_label(ai_result.get("source")).lower()
+    if inferred_source and confidence >= 0.45:
+        source = inferred_source
+    elif (os.getenv("GALLERY_AI_PROVIDER", "").strip().lower() == "ollama" or os.getenv("GALLERY_OLLAMA_MODEL")) and confidence >= 0.45:
+        source = "ollama"
+    else:
+        source = "openai" if confidence >= 0.45 else fallback.source
     return SmartMediaAnalysis(
         title=title,
         suggested_filename=suggested_filename,
@@ -377,6 +429,8 @@ def _ollama_vision_analysis(
         "Never copy category_name into title. Category is metadata, not the title.\n"
         "The title must mention the subject, character, franchise, or defining content if visible.\n"
         "If multiple clear named characters appear, title it naturally using both names.\n"
+        "If a real person, celebrity, or fictional character is clearly identifiable, include their name in the title and tags.\n"
+        "If identity is uncertain, do not guess. Use descriptive visual details instead.\n"
         "Create up to 12 short lowercase tags. Do not include numeric file IDs as tags.\n"
         "Only give a specific character or subcategory if the visual evidence is clear.\n"
         "Prefer these main categories when they fit: " + ", ".join(KNOWN_CATEGORIES) + ".\n"
@@ -464,6 +518,8 @@ def _openai_vision_analysis(
         "You analyze media uploads for a personal gallery. Return structured JSON only. "
         "Never use generic titles like Backgrounds, Wallpaper, Image, Art, or Artwork. "
         "Make the title natural, concise, and specific to the visible subject. "
+        "If a real person, celebrity, or fictional character is clearly identifiable, include their name in the title and tags. "
+        "If identity is uncertain, do not guess. Use descriptive details instead. "
         "Create up to 12 short lowercase tags. "
         "Choose a broad category when uncertain. "
         "Only give a specific character or subcategory if the visual evidence is clear. "
@@ -555,6 +611,85 @@ def _response_text(payload: dict[str, Any]) -> str:
             if text:
                 return text
     return ""
+
+
+def _local_clip_analysis(
+    *,
+    content: bytes,
+    filename: str,
+    mime_type: str,
+    media_kind: str,
+    fallback: SmartMediaAnalysis,
+) -> dict[str, Any] | None:
+    if media_kind != "image":
+        return None
+
+    classifier = Path(os.getenv("GALLERY_LOCAL_VISION_COMMAND") or os.path.expanduser("~/.local/bin/ai-enhance"))
+    if not classifier.is_file():
+        return None
+
+    suffix = Path(filename or "image").suffix or mimetypes.guess_extension(mime_type or "") or ".jpg"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as handle:
+        handle.write(content)
+        handle.flush()
+        try:
+            result = subprocess.run(
+                [str(classifier), "--vision-classify", handle.name],
+                capture_output=True,
+                text=True,
+                timeout=45,
+                check=True,
+            )
+        except Exception:
+            return None
+
+    report = result.stdout or ""
+    label_match = re.search(r"^Top label:\s*(.+)$", report, re.MULTILINE)
+    score_match = re.search(r"^Confidence:\s*([0-9.]+)$", report, re.MULTILINE)
+    guesses_match = re.search(r"^Top guesses:\s*(.+)$", report, re.MULTILINE)
+    label = _clean_label(label_match.group(1) if label_match else "")
+    if not label:
+        return None
+
+    top_guesses = [
+        _clean_label(part.split("(", 1)[0])
+        for part in str(guesses_match.group(1) if guesses_match else "").split(",")
+        if _clean_label(part.split("(", 1)[0])
+    ]
+    score = _clamp_float(score_match.group(1) if score_match else None, 0.0, 1.0, 0.35)
+    confidence = max(0.46, min(0.68, score + 0.12))
+
+    normalized_label = label.lower()
+    category_name = fallback.category_name
+    if normalized_label in {"anime", "cartoon", "illustration", "painting"}:
+        category_name = category_name or "Cartoon"
+    elif normalized_label == "portrait photo":
+        category_name = category_name or "Profile Pictures"
+    elif normalized_label == "landscape photo":
+        category_name = category_name or "Wallpapers"
+
+    tags = _normalize_tags([label, *top_guesses, *(fallback.tags[:4] if fallback.tags else [])])
+    title = fallback.title
+    if normalized_label in {"anime", "cartoon", "illustration", "painting"} and _is_bad_subject_title(title, category_name, fallback.subcategory_name):
+        title = "Anime illustration"
+    elif normalized_label == "portrait photo" and _is_bad_subject_title(title, category_name, fallback.subcategory_name):
+        title = "Portrait photo"
+    elif normalized_label == "landscape photo" and _is_bad_subject_title(title, category_name, fallback.subcategory_name):
+        title = "Landscape photo"
+    elif normalized_label in {"logo", "icon", "sticker"} and _is_bad_subject_title(title, category_name, fallback.subcategory_name):
+        title = f"{label.title()} graphic"
+
+    return {
+        "title": title,
+        "suggested_filename_base": "",
+        "tags": tags[:12],
+        "category_name": category_name or "",
+        "subcategory_name": fallback.subcategory_name or "",
+        "is_adult": False,
+        "confidence": confidence,
+        "reason": f"Local CLIP fallback matched {label} ({score:.2f})",
+        "source": "local-clip",
+    }
 
 
 def _media_size(content: bytes, filename: str, mime_type: str, media_kind: str) -> tuple[int, int] | None:
