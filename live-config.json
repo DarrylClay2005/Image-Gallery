@@ -1,6 +1,6 @@
 {
-  "gallery_url": "https://viruses-store-temperatures-tuner.trycloudflare.com",
-  "status": "live",
+  "gallery_url": "",
+  "status": "offline",
   "local_urls": ["http://127.0.0.1:8788", "http://localhost:8788", "http://192.168.12.188:8788"],
-  "updated_at": "2026-05-04T22:53:28-05:00"
+  "updated_at": "2026-05-04T23:00:34-05:00"
 }
