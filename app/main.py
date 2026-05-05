@@ -11,6 +11,7 @@ import hmac
 import random
 import struct
 import time
+from urllib.parse import quote, urlparse
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import date, datetime
@@ -23,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .ai_metadata import analyze_media_bytes, is_low_signal_filename
 from .auth import extract_bearer_token, issue_token, require_auth, verify_token
@@ -50,6 +52,7 @@ BACKGROUND_ASPECT_RATIO = 16 / 9
 BACKGROUND_ASPECT_TOLERANCE = 0.035
 BACKGROUND_CACHE_SECONDS = 300
 PREVIEW_CACHE_MAX_ITEMS = 256
+MAX_IMAGE_PIXELS = max(8_000_000, int(os.getenv("GALLERY_MAX_IMAGE_PIXELS", "80000000")))
 _background_cache_lock = asyncio.Lock()
 _background_cache: dict[str, Any] = {"built_at": 0.0, "items": []}
 _preview_cache: OrderedDict[tuple[str, str], tuple[bytes, str]] = OrderedDict()
@@ -261,6 +264,12 @@ def _preview_url(request: Request, media_id: int) -> str:
     return str(request.url_for("serve_media_preview", media_id=media_id))
 
 
+def _download_filename(value: str | None, fallback: str = "download") -> str:
+    filename = (Path(str(value or fallback)).name or fallback).replace("\r", "").replace("\n", "").strip()
+    filename = filename[:180] or fallback
+    return f"attachment; filename*=UTF-8''{quote(filename)}"
+
+
 def _avatar_revision_token(user_or_item: dict[str, Any] | None, *, path_key: str, file_id_key: str = "avatar_file_id") -> str | None:
     if not user_or_item:
         return None
@@ -362,7 +371,7 @@ def _render_image_preview(content: bytes, mime_type: str | None, digest: str, *,
     try:
         from PIL import Image, ImageOps, ImageSequence
 
-        Image.MAX_IMAGE_PIXELS = None
+        Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
         resampling = getattr(Image, "Resampling", Image)
         with Image.open(io.BytesIO(content)) as image:
             frame = next(ImageSequence.Iterator(image), image)
@@ -716,6 +725,100 @@ def _rate_limit(key: str, *, limit: int, window_seconds: int) -> None:
     RATE_BUCKETS[key] = bucket
 
 
+def _normalize_origin(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
+def _origin_from_referer(value: str | None) -> str:
+    return _normalize_origin(value)
+
+
+def _allowed_browser_origins() -> set[str]:
+    origins = {
+        _normalize_origin(settings.pages_public_url),
+        "http://127.0.0.1:8788",
+        "http://localhost:8788",
+        "http://127.0.0.1:8000",
+        "http://localhost:8000",
+    }
+    origins.update(_normalize_origin(origin) for origin in settings.cors_allowed_origins)
+    return {origin for origin in origins if origin}
+
+
+def _trusted_hosts() -> list[str]:
+    if settings.trusted_hosts:
+        return list(dict.fromkeys(settings.trusted_hosts))
+    hosts = {
+        "localhost",
+        "127.0.0.1",
+        "host.docker.internal",
+        "*.trycloudflare.com",
+        "*.pinggy-free.link",
+        "*.serveousercontent.com",
+        "*.lhr.life",
+    }
+    for origin in _allowed_browser_origins():
+        try:
+            parsed = urlparse(origin)
+        except Exception:
+            continue
+        if parsed.hostname:
+            hosts.add(parsed.hostname)
+    return sorted(hosts)
+
+
+def _allowed_request_origin(request: Request) -> str:
+    origin = _normalize_origin(request.headers.get("origin"))
+    if origin:
+        return origin
+    return _origin_from_referer(request.headers.get("referer"))
+
+
+def _ensure_allowed_browser_origin(request: Request) -> None:
+    origin = _allowed_request_origin(request)
+    if not origin:
+        return
+    current = _normalize_origin(str(request.base_url))
+    if origin == current or origin in _allowed_browser_origins():
+        return
+    raise HTTPException(status_code=403, detail="Blocked cross-origin request.")
+
+
+def _security_headers(request: Request, response: Response) -> None:
+    csp = "; ".join([
+        "default-src 'self'",
+        "base-uri 'self'",
+        "object-src 'none'",
+        "frame-ancestors 'none'",
+        "form-action 'self'",
+        "img-src 'self' data: blob: https:",
+        "media-src 'self' blob: data: https:",
+        "font-src 'self' data: https://fonts.gstatic.com",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "script-src 'self' 'unsafe-inline'",
+        "connect-src 'self' https: http: ws: wss:",
+    ])
+    response.headers.setdefault("Content-Security-Policy", csp)
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    if request.url.scheme == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    if request.url.path in {"/"} or request.url.path.startswith("/api/auth/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+
+
 def _sniff_magic(data: bytes) -> tuple[str, str]:
     head = data[:32]
     if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
@@ -760,6 +863,22 @@ async def _read_validated_upload(upload: UploadFile, max_bytes: int, *, image_on
         raise HTTPException(status_code=400, detail="Invalid declared content type.")
     original_filename = Path(upload.filename or "upload").name[:255]
     _safe_extension(original_filename, sniffed_mime)
+    if media_kind == "image":
+        try:
+            from PIL import Image
+
+            Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+            with Image.open(io.BytesIO(content)) as image:
+                width, height = image.size
+                if width <= 0 or height <= 0:
+                    raise HTTPException(status_code=400, detail="Image dimensions are invalid.")
+                if width * height > MAX_IMAGE_PIXELS:
+                    raise HTTPException(status_code=413, detail="Image resolution is too large.")
+        except HTTPException:
+            raise
+        except Exception:
+            # Some valid formats may not decode in Pillow on every platform; magic-byte validation already ran.
+            pass
     sha256 = hashlib.sha256(content).hexdigest()
     return {
         "content": content,
@@ -815,16 +934,29 @@ cors_origin_regex = os.getenv(
     "GALLERY_CORS_ALLOW_ORIGIN_REGEX",
     r"(https://[a-z0-9-]+\.(trycloudflare\.com|pinggy-free\.link|serveousercontent\.com|lhr\.life)|http://(localhost|127\.0\.0\.1|10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})(:\d+)?)",
 )
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=_trusted_hosts())
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_origin_regex=cors_origin_regex,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
 )
 app.mount("/static", StaticFiles(directory=ROOT_DIR / "app" / "static"), name="static")
 app.mount("/app/static", StaticFiles(directory=ROOT_DIR / "app" / "static"), name="app_static")
+
+
+@app.middleware("http")
+async def browser_origin_and_headers(request: Request, call_next):
+    try:
+        if request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+            _ensure_allowed_browser_origin(request)
+        response = await call_next(request)
+    except HTTPException as exc:
+        response = Response(content=str(exc.detail or "Request blocked"), status_code=exc.status_code, media_type="text/plain")
+    _security_headers(request, response)
+    return response
 
 
 @app.get("/")
@@ -921,6 +1053,7 @@ async def migrate_legacy_files(request: Request) -> dict[str, Any]:
 
 @app.post("/api/auth/register")
 async def register(payload: RegisterRequest, request: Request) -> dict[str, Any]:
+    _rate_limit(f"register:{_client_ip(request)}", limit=10, window_seconds=3600)
     email_token = _verification_code() if payload.email else None
     try:
         user = await db.register_user(payload.username, payload.password, payload.display_name, payload.email, email_token)
@@ -957,6 +1090,7 @@ async def verify_email(request: Request, token: str):
 @app.post("/api/auth/resend-verification")
 async def resend_verification(request: Request) -> dict[str, Any]:
     auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    _rate_limit(f"resend-verification:{auth['id']}", limit=8, window_seconds=3600)
     user = await db.get_user(int(auth["id"]))
     if not user:
         raise HTTPException(status_code=404, detail="Account not found.")
@@ -973,6 +1107,7 @@ async def resend_verification(request: Request) -> dict[str, Any]:
 @app.post("/api/me/email")
 async def update_email(payload: EmailUpdateRequest, request: Request) -> dict[str, Any]:
     auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    _rate_limit(f"email-update:{auth['id']}", limit=8, window_seconds=3600)
     try:
         user = await db.update_user_email(int(auth["id"]), payload.email)
     except ValueError as exc:
@@ -988,6 +1123,7 @@ async def update_email(payload: EmailUpdateRequest, request: Request) -> dict[st
 @app.post("/api/me/email/verify")
 async def verify_email_code(payload: EmailCodeRequest, request: Request) -> dict[str, Any]:
     auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    _rate_limit(f"email-verify:{auth['id']}", limit=20, window_seconds=3600)
     code = re.sub(r"\D+", "", str(payload.code or ""))[:12]
     if not code:
         raise HTTPException(status_code=400, detail="Enter the verification code from your email.")
@@ -1492,7 +1628,8 @@ async def analyze_media_upload(
     description: str = Form(""),
     tags: str = Form(""),
 ) -> dict[str, Any]:
-    require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    auth = require_auth(request, settings.session_secret, settings.api_token_ttl_seconds)
+    _rate_limit(f"analyze:{auth['id']}", limit=120, window_seconds=3600)
     uploaded = await _read_validated_upload(file, settings.max_upload_bytes)
     analysis = analyze_media_bytes(
         content=uploaded["content"],
@@ -1672,7 +1809,7 @@ async def _serve_media_content(media_id: int, request: Request, *, access: str |
         headers = {"X-Content-SHA256": digest}
         if as_download:
             await db.increment_counter(media_id, "downloads")
-            headers["Content-Disposition"] = f'attachment; filename="{file_row["original_filename"]}"'
+            headers["Content-Disposition"] = _download_filename(file_row["original_filename"])
         else:
             headers["Cache-Control"] = "public, max-age=86400"
         return Response(content=file_row["content"], media_type=file_row["mime_type"], headers=headers)
@@ -1684,8 +1821,12 @@ async def _serve_media_content(media_id: int, request: Request, *, access: str |
         return FileResponse(
             legacy,
             media_type=item.get("mime_type") or mimetypes.guess_type(str(legacy))[0] or "application/octet-stream",
-            filename=item.get("original_filename") if as_download else None,
-            headers={"Cache-Control": "public, max-age=86400"} if not as_download else None,
+            filename=None,
+            headers=(
+                {"Cache-Control": "public, max-age=86400"}
+                if not as_download
+                else {"Content-Disposition": _download_filename(item.get("original_filename"))}
+            ),
         )
 
     raise HTTPException(

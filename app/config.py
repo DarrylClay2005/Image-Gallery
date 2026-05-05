@@ -56,6 +56,7 @@ class Settings:
     session_secret: str
     api_token_ttl_seconds: int
     cors_allowed_origins: list[str]
+    trusted_hosts: list[str]
     pages_public_url: str
     uploads_dir: Path
     max_upload_bytes: int
@@ -100,6 +101,7 @@ def load_settings() -> Settings:
         session_secret=_env("GALLERY_SESSION_SECRET", "change-this-gallery-secret"),
         api_token_ttl_seconds=int(_env("GALLERY_API_TOKEN_TTL_SECONDS", "1209600")),
         cors_allowed_origins=_env_csv("GALLERY_CORS_ALLOWED_ORIGINS"),
+        trusted_hosts=_env_csv("GALLERY_TRUSTED_HOSTS"),
         pages_public_url=pages_url,
         uploads_dir=Path(_env("GALLERY_UPLOADS_DIR", str(ROOT_DIR / "uploads"))),
         max_upload_bytes=int(_env("GALLERY_MAX_UPLOAD_BYTES", str(500 * 1024 * 1024))),

@@ -2822,6 +2822,7 @@ button,
   max-height: var(--dynamic-modal-height) !important;
   overflow: auto !important;
   overscroll-behavior: contain;
+  scroll-padding-bottom: 112px;
   padding: clamp(12px, calc(18px * var(--dynamic-ui-scale)), 22px) !important;
 }
 
@@ -3004,9 +3005,10 @@ body[data-ui-size="compact"] .page-hero-actions {
 }
 
 #settings-dialog .modal-shell.wide {
-  width: min(1180px, calc(100vw - 18px)) !important;
+  width: min(1120px, calc(100vw - 18px)) !important;
   max-height: calc(100dvh - 18px) !important;
   overflow: auto;
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 24px) !important;
 }
 
 #settings-dialog .modal-head,
@@ -3026,6 +3028,8 @@ body[data-ui-size="compact"] .page-hero-actions {
   bottom: 0;
   margin-top: 4px;
   padding-top: 12px;
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 8px);
+  box-shadow: 0 -14px 24px rgba(5, 8, 14, 0.22);
 }
 
 #settings-dialog .profile-row {
@@ -3050,12 +3054,12 @@ body[data-ui-size="compact"] .page-hero-actions {
 }
 
 #settings-dialog .form-grid {
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
 }
 
 #settings-dialog .toggle-row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
   gap: 10px;
 }
 
@@ -3063,6 +3067,54 @@ body[data-ui-size="compact"] .page-hero-actions {
 #settings-dialog .field select,
 #settings-dialog .field textarea {
   min-width: 0;
+  width: 100%;
+}
+
+#upload-dialog .modal-shell.wide {
+  width: min(1080px, calc(100vw - 18px)) !important;
+  max-height: calc(100dvh - 18px) !important;
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 24px) !important;
+}
+
+#upload-dialog .form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+}
+
+#upload-dialog .upload-ai-actions {
+  display: grid !important;
+  grid-template-columns: minmax(0, 280px) minmax(0, 1fr) !important;
+  align-items: center !important;
+}
+
+#upload-dialog .upload-ai-actions small,
+#upload-dialog .field,
+#settings-dialog .field {
+  min-width: 0;
+}
+
+#upload-dialog .upload-controls-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+}
+
+#upload-dialog .check-row {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+}
+
+#upload-form .modal-actions {
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 8px);
+  box-shadow: 0 -14px 24px rgba(5, 8, 14, 0.22);
+}
+
+@media (max-width: 940px) {
+  #settings-dialog .form-grid,
+  #settings-dialog .toggle-row,
+  #upload-dialog .form-grid,
+  #upload-dialog .upload-ai-actions,
+  #upload-dialog .upload-controls-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
 }
 
 @media (max-width: 820px) {

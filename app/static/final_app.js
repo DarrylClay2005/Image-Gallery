@@ -4324,17 +4324,17 @@ boot();
   let observerReady = false;
 
   function computeScale() {
-    const width = Math.max(320, window.innerWidth || document.documentElement.clientWidth || 320);
-    const height = Math.max(480, window.innerHeight || document.documentElement.clientHeight || 480);
+    const width = Math.max(320, window.visualViewport?.width || window.innerWidth || document.documentElement.clientWidth || 320);
+    const height = Math.max(480, window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 480);
     const zoomAwareWidthScale = width / 1440;
     const heightScale = height / 900;
     return clamp(Math.min(zoomAwareWidthScale, heightScale) + 0.16, 0.76, 1.06);
   }
 
   function classifyViewport() {
-    const width = window.innerWidth || document.documentElement.clientWidth || 0;
+    const width = window.visualViewport?.width || window.innerWidth || document.documentElement.clientWidth || 0;
     if (width <= 560) return 'compact';
-    if (width <= 980) return 'narrow';
+    if (width <= 1120) return 'narrow';
     if (width >= 1600) return 'wide';
     return 'normal';
   }
