@@ -64,6 +64,11 @@ KNOWN_CATEGORIES = [
 VISION_BACKOFF: dict[str, float] = {}
 
 
+def _local_vision_command() -> Path | None:
+    classifier = Path(os.getenv("GALLERY_LOCAL_VISION_COMMAND") or os.path.expanduser("~/.local/bin/ai-enhance"))
+    return classifier if classifier.is_file() else None
+
+
 @dataclass
 class SmartMediaAnalysis:
     title: str
@@ -149,11 +154,18 @@ def analyze_media_bytes(
         size=size,
     )
 
+    local_classifier = _local_vision_command()
     provider = str(os.getenv("GALLERY_AI_PROVIDER", "")).strip().lower()
-    if provider not in {"ollama", "openai"}:
-        provider = "ollama" if (os.getenv("GALLERY_OLLAMA_MODEL") or os.getenv("GALLERY_OLLAMA_BASE_URL")) else "openai"
+    if provider not in {"local", "ollama", "openai"}:
+        if local_classifier:
+            provider = "local"
+        elif os.getenv("GALLERY_OLLAMA_MODEL") or os.getenv("GALLERY_OLLAMA_BASE_URL"):
+            provider = "ollama"
+        else:
+            provider = "openai"
     enabled_default = bool(
-        os.getenv("GALLERY_OLLAMA_MODEL")
+        local_classifier
+        or os.getenv("GALLERY_OLLAMA_MODEL")
         or os.getenv("GALLERY_OLLAMA_BASE_URL")
         or ai_model
         or ai_api_key
@@ -193,6 +205,33 @@ def analyze_media_bytes(
                 )
 
     try:
+        if provider == "local":
+            local_clip_result = _local_clip_analysis(
+                content=content,
+                filename=filename,
+                mime_type=mime_type,
+                media_kind=media_kind,
+                fallback=fallback,
+            )
+            if local_clip_result:
+                local_clip_result["reason"] = local_clip_result.get("reason") or "Primary local vision classifier matched this image."
+                return _merge_analysis(
+                    ai_result=local_clip_result,
+                    fallback=fallback,
+                    filename=filename,
+                    mime_type=mime_type,
+                    media_kind=media_kind,
+                )
+            if os.getenv("GALLERY_OLLAMA_MODEL") or os.getenv("GALLERY_OLLAMA_BASE_URL"):
+                provider = "ollama"
+            else:
+                api_key = str(ai_api_key or os.getenv("GALLERY_AI_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
+                if api_key:
+                    provider = "openai"
+                else:
+                    fallback.reason = "Local vision classifier could not confidently identify this image."
+                    return fallback
+
         if provider == "ollama" or os.getenv("GALLERY_OLLAMA_MODEL"):
             model = str(os.getenv("GALLERY_OLLAMA_MODEL") or ai_model or "qwen2.5vl:7b").strip()
             base_url = str(os.getenv("GALLERY_OLLAMA_BASE_URL") or ai_base_url or "http://127.0.0.1:11434").rstrip("/")
@@ -624,8 +663,8 @@ def _local_clip_analysis(
     if media_kind != "image":
         return None
 
-    classifier = Path(os.getenv("GALLERY_LOCAL_VISION_COMMAND") or os.path.expanduser("~/.local/bin/ai-enhance"))
-    if not classifier.is_file():
+    classifier = _local_vision_command()
+    if not classifier:
         return None
 
     suffix = Path(filename or "image").suffix or mimetypes.guess_extension(mime_type or "") or ".jpg"

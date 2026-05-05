@@ -2979,3 +2979,99 @@ body[data-ui-size="compact"] .page-hero-actions {
 .ui-overflow-guard textarea {
   white-space: normal !important;
 }
+
+/* 2026 gallery performance + settings fit pass */
+.gallery-grid {
+  content-visibility: auto;
+  contain-intrinsic-size: 1200px;
+}
+
+.media-card,
+.collection-card,
+.user-card,
+.studio-item,
+.saved-view-card,
+.page-panel {
+  content-visibility: auto;
+  contain-intrinsic-size: 320px;
+  contain: layout paint style;
+}
+
+.media-preview img,
+.media-preview video {
+  image-rendering: auto;
+  transform: translateZ(0);
+}
+
+#settings-dialog .modal-shell.wide {
+  width: min(1180px, calc(100vw - 18px)) !important;
+  max-height: calc(100dvh - 18px) !important;
+  overflow: auto;
+}
+
+#settings-dialog .modal-head,
+#settings-dialog .modal-actions {
+  position: sticky;
+  z-index: 6;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+#settings-dialog .modal-head {
+  top: 0;
+}
+
+#settings-dialog .modal-actions {
+  bottom: 0;
+  margin-top: 4px;
+  padding-top: 12px;
+}
+
+#settings-dialog .profile-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+}
+
+#settings-dialog .profile-row > * {
+  min-width: 0;
+}
+
+#settings-dialog .profile-row > button {
+  justify-self: start;
+}
+
+#settings-dialog .avatar.large {
+  width: 92px;
+  height: 92px;
+  flex-shrink: 0;
+}
+
+#settings-dialog .form-grid {
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+}
+
+#settings-dialog .toggle-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+#settings-dialog .field input,
+#settings-dialog .field select,
+#settings-dialog .field textarea {
+  min-width: 0;
+}
+
+@media (max-width: 820px) {
+  #settings-dialog .profile-row {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  #settings-dialog .avatar.large {
+    justify-self: center;
+  }
+}

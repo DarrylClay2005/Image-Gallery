@@ -322,6 +322,19 @@ function normalizeApiLinkedUrls(value) {
   return normalized;
 }
 
+function appendQueryParam(url, key, value) {
+  const raw = String(url || "").trim();
+  if (!raw || !key) return raw;
+  try {
+    const parsed = new URL(raw, window.location.href);
+    parsed.searchParams.set(String(key), String(value));
+    return parsed.toString();
+  } catch (_err) {
+    const joiner = raw.includes("?") ? "&" : "?";
+    return `${raw}${joiner}${encodeURIComponent(String(key))}=${encodeURIComponent(String(value))}`;
+  }
+}
+
 function syncStoredUserUrls() {
   if (!currentUser) return;
   currentUser = normalizeApiLinkedUrls(currentUser);
@@ -534,6 +547,26 @@ function normalizedPublicUrl(value, { allowBlob = false } = {}) {
   return "";
 }
 
+function avatarRevisionFromPath(value) {
+  const raw = String(value || "").trim();
+  return raw.startsWith("avatar-db://") ? raw.slice("avatar-db://".length).trim() : "";
+}
+
+function avatarUrlForRecord(record, {
+  urlKey = "avatar_url",
+  pathKey = "avatar_path",
+  fileIdKey = "avatar_file_id",
+  idKey = "id",
+} = {}) {
+  const direct = normalizedPublicUrl(record?.[urlKey]);
+  if (direct) return direct;
+  const userId = record?.[idKey];
+  if (!userId || !record?.[pathKey]) return "";
+  const revision = record?.[fileIdKey] || avatarRevisionFromPath(record?.[pathKey]);
+  const base = apiUrl(`/api/users/${userId}/avatar`);
+  return normalizedPublicUrl(revision ? appendQueryParam(base, "v", revision) : base);
+}
+
 function safeUrl(value, options = {}) {
   return escapeHtml(normalizedPublicUrl(value, options));
 }
@@ -709,7 +742,10 @@ function adultBadge(item) {
 }
 
 function analysisSourceLabel(source) {
-  return source === "openai" || source === "ollama" || source === "local-clip" ? "AI" : "Smart fallback";
+  if (source === "local-clip") return "Local vision";
+  if (source === "ollama") return "Ollama vision";
+  if (source === "openai") return "AI";
+  return "Smart fallback";
 }
 
 function renderPreview(item, size = "card") {
@@ -718,7 +754,9 @@ function renderPreview(item, size = "card") {
   const locked = isAdult && !canRevealAdult(item);
   const blur = isAdult && !revealed && !locked;
   const placeholderText = locked ? "18+ Verify Age" : "Click To Reveal";
-  const previewUrl = normalizedPublicUrl(item.media_kind === "image" ? (item.preview_url || item.url) : item.url);
+  const previewVariant = size === "mini" || size === "card" ? "mini" : "detail";
+  const previewBaseUrl = item.media_kind === "image" ? (item.preview_url || item.url) : item.url;
+  const previewUrl = normalizedPublicUrl(item.media_kind === "image" ? appendQueryParam(previewBaseUrl, "size", previewVariant) : previewBaseUrl);
   const body = locked
     ? `<div class="locked-preview"><strong>18+</strong><span>Verify age to view</span></div>`
     : !previewUrl
@@ -738,8 +776,11 @@ function userSettings() {
 
 function renderAvatar(id, user) {
   const el = $(id);
+  if (!el) return;
   const name = user?.display_name || user?.username || "IG";
-  const avatarUrl = normalizedPublicUrl(user?.avatar_url || user?.user_avatar_url);
+  const avatarUrl = avatarUrlForRecord(user)
+    || avatarUrlForRecord(user, { urlKey: "user_avatar_url", pathKey: "user_avatar_path", fileIdKey: "user_avatar_file_id", idKey: "user_id" })
+    || avatarUrlForRecord(user, { urlKey: "user_avatar_url", pathKey: "user_avatar_path", fileIdKey: "user_avatar_file_id", idKey: "id" });
   if (avatarUrl) {
     el.innerHTML = `<img src="${escapeHtml(avatarUrl)}" alt="">`;
   } else {
@@ -752,7 +793,9 @@ function renderButtonAvatar(id, user, fallbackLabel = "IG") {
   const el = safeEl(id);
   if (!el) return;
   const name = user?.display_name || user?.username || fallbackLabel;
-  const avatarUrl = normalizedPublicUrl(user?.avatar_url || user?.user_avatar_url);
+  const avatarUrl = avatarUrlForRecord(user)
+    || avatarUrlForRecord(user, { urlKey: "user_avatar_url", pathKey: "user_avatar_path", fileIdKey: "user_avatar_file_id", idKey: "user_id" })
+    || avatarUrlForRecord(user, { urlKey: "user_avatar_url", pathKey: "user_avatar_path", fileIdKey: "user_avatar_file_id", idKey: "id" });
   if (avatarUrl) {
     el.innerHTML = `<img src="${escapeHtml(avatarUrl)}" alt="">`;
   } else {
@@ -2104,6 +2147,7 @@ function openSlideshow(sourceItems = null) {
 function renderMediaGrid() {
   const grid = $("gallery-grid");
   grid.innerHTML = "";
+  const fragment = document.createDocumentFragment();
   const visibleIds = new Set(mediaItems.map((item) => Number(item.id)));
   compareSelection = new Set(Array.from(compareSelection).filter((id) => visibleIds.has(Number(id))));
   const start = mediaItems.length ? ((galleryPage - 1) * galleryPageSize()) + 1 : 0;
@@ -2136,7 +2180,7 @@ function renderMediaGrid() {
     const card = document.createElement("article");
     const selectedForCompare = compareSelection.has(Number(item.id));
     const accent = safeHexColor(item.profile_color, "#37c9a7");
-    const avatarUrl = normalizedPublicUrl(item.user_avatar_url);
+    const avatarUrl = avatarUrlForRecord(item, { urlKey: "user_avatar_url", pathKey: "user_avatar_path", fileIdKey: "user_avatar_file_id", idKey: "user_id" });
     card.className = `media-card${item.is_adult ? " adult-card" : ""}${selectedForCompare ? " is-compared" : ""}`;
     card.innerHTML = `
       <button class="media-preview" type="button" data-open="${item.id}">${renderPreview(item)}</button>
@@ -2169,8 +2213,9 @@ function renderMediaGrid() {
         </div>
       </div>
     `;
-    grid.appendChild(card);
+    fragment.appendChild(card);
   }
+  grid.appendChild(fragment);
   updateCompareUi();
   enhanceMotion(grid);
 }
@@ -2196,7 +2241,7 @@ async function openDetail(id) {
   activeDetail = data.media;
   const item = activeDetail;
   const mediaUrl = normalizedPublicUrl(item.url);
-  const avatarUrl = normalizedPublicUrl(item.user_avatar_url);
+  const avatarUrl = avatarUrlForRecord(item, { urlKey: "user_avatar_url", pathKey: "user_avatar_path", fileIdKey: "user_avatar_file_id", idKey: "user_id" });
   const websiteUrl = normalizedPublicUrl(item.user_website_url);
   $("detail-title").innerHTML = `${adultBadge(item)}${escapeHtml(item.title)}`;
   $("detail-media").innerHTML = !mediaUrl
@@ -2245,7 +2290,7 @@ async function openAdjacentDetail(direction) {
 function renderComments(comments) {
   $("comments-list").innerHTML = comments.map((comment) => {
     const canDelete = currentUser && (Number(comment.user_id) === Number(currentUser.id) || Number(activeDetail?.user_id) === Number(currentUser.id));
-    const avatarUrl = normalizedPublicUrl(comment.user_avatar_url || (comment.user_avatar_path ? `${apiOrigin}/api/users/${comment.user_id}/avatar` : ""));
+    const avatarUrl = avatarUrlForRecord(comment, { urlKey: "user_avatar_url", pathKey: "user_avatar_path", fileIdKey: "user_avatar_file_id", idKey: "user_id" });
     return `
       <div class="comment">
         <div class="comment-head">
@@ -2628,7 +2673,7 @@ function friendButtonLabel(status) {
 }
 
 function userCard(user, { compact = false } = {}) {
-  const avatarUrl = normalizedPublicUrl(user.avatar_url);
+  const avatarUrl = avatarUrlForRecord(user);
   const accent = safeHexColor(user.profile_color, "#37c9a7");
   const avatar = avatarUrl
     ? `<img src="${escapeHtml(avatarUrl)}" alt="">`
@@ -2850,7 +2895,7 @@ function renderProfile(data) {
   const user = data.user || {};
   const prefs = { ...DEFAULT_USER_SETTINGS, ...(user.user_settings || {}) };
   const profileAccent = safeHexColor(user.profile_color, "#37c9a7");
-  const avatarUrl = normalizedPublicUrl(user.avatar_url);
+  const avatarUrl = avatarUrlForRecord(user);
   const websiteUrl = normalizedPublicUrl(user.website_url);
   const safeLayout = safeClassToken(prefs.profile_layout, "spotlight");
   const safeCardStyle = safeClassToken(prefs.profile_card_style, "glass");
@@ -3205,12 +3250,18 @@ async function saveProfileCustomization() {
 
 async function saveAvatar() {
   if (!currentUser) return;
-  const file = $("settings-avatar-file").files[0];
+  const fileInput = safeEl("settings-avatar-file");
+  const file = fileInput?.files?.[0];
   if (!file) return setNotice("settings-error", "Choose an image first.");
   if (file.size > 5 * 1024 * 1024) return setNotice("settings-error", "Profile pictures must be 5MB or smaller.");
   const body = new FormData();
   body.set("file", file);
+  const saveButton = safeEl("avatar-save");
   try {
+    if (saveButton) {
+      saveButton.disabled = true;
+      saveButton.textContent = "Saving...";
+    }
     setNotice("settings-error", "Saving profile picture...", "success");
     const data = await apiUpload("/api/me/avatar", body);
     currentUser = data.user;
@@ -3222,9 +3273,14 @@ async function saveAvatar() {
       renderProfile(profilePageData);
     }
     setNotice("settings-error", "Profile picture saved.", "success");
-    safeEl("settings-avatar-file").value = "";
+    if (fileInput) fileInput.value = "";
   } catch (err) {
     setNotice("settings-error", err.message);
+  } finally {
+    if (saveButton) {
+      saveButton.disabled = false;
+      saveButton.textContent = "Save Picture";
+    }
   }
 }
 
@@ -3258,7 +3314,7 @@ function closeUploadDialog() {
   uploadAiBusy = false;
   uploadAiAnalysis = null;
   setTextIfPresent("file-label", "Choose images, GIFs, or videos under 500MB each");
-  setTextIfPresent("upload-ai-status", "Select a file to preview AI suggestions. Multi-file uploads still get analyzed again during save.");
+  setTextIfPresent("upload-ai-status", "Select a file to auto-analyze with the local vision model before upload. Multi-file uploads still get analyzed again during save.");
   showIfPresent("upload-ai-preview", false);
   if (safeEl("upload-ai-preview")) $("upload-ai-preview").innerHTML = "";
   setDisabledIfPresent("upload-analyze", false);
@@ -3419,7 +3475,7 @@ function updateUploadFileSummary() {
   if (!files.length) {
     uploadAiAnalysis = null;
     showIfPresent("upload-ai-preview", false);
-    setTextIfPresent("upload-ai-status", "Select a file to preview AI suggestions. Multi-file uploads still get analyzed again during save.");
+    setTextIfPresent("upload-ai-status", "Select a file to auto-analyze with the local vision model before upload. Multi-file uploads still get analyzed again during save.");
   } else if (safeEl("upload-auto-ai")?.checked) {
     analyzeUploadSelection({ apply: true, silent: true });
   } else {

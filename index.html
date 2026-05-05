@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#101318" />
   <title>Image Gallery — Modern media vault</title>
   <meta name="description" content="A modern, searchable personal media gallery with collections, profiles, and live backend checks." />
-  <link rel="stylesheet" href="./app/static/styles.css?v=20260430-dynamic-overlap-v2" />
+  <link rel="stylesheet" href="./app/static/styles.css?v=20260505-gallery-audit-v2" />
 </head>
 <body data-ui-revamp="2026">
   <a class="skip-link" href="#discover-page">Skip to gallery</a>
@@ -704,7 +704,7 @@
         </label>
         <div class="upload-ai-actions">
           <button id="upload-analyze" type="button">Analyze First File</button>
-          <small id="upload-ai-status" class="muted">Select a file to preview AI suggestions. Multi-file uploads still get analyzed again during save.</small>
+          <small id="upload-ai-status" class="muted">Select a file to auto-analyze with the local vision model before upload. Multi-file uploads still get analyzed again during save.</small>
         </div>
         <div id="upload-ai-preview" class="upload-ai-preview" hidden></div>
       </div>
@@ -889,6 +889,6 @@
     <button id="compare-clear" type="button">Clear</button>
   </div>
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true" hidden></div>
-  <script src="./app/static/final_app.js?v=20260430-dynamic-overlap-v2"></script>
+  <script src="./app/static/final_app.js?v=20260505-gallery-audit-v2"></script>
 </body>
 </html>

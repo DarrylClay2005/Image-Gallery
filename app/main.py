@@ -261,6 +261,28 @@ def _preview_url(request: Request, media_id: int) -> str:
     return str(request.url_for("serve_media_preview", media_id=media_id))
 
 
+def _avatar_revision_token(user_or_item: dict[str, Any] | None, *, path_key: str, file_id_key: str = "avatar_file_id") -> str | None:
+    if not user_or_item:
+        return None
+    file_id = user_or_item.get(file_id_key)
+    if file_id not in (None, "", 0, "0"):
+        return str(file_id)
+    raw_path = str(user_or_item.get(path_key) or "").strip()
+    if raw_path.startswith("avatar-db://"):
+        return raw_path.split("avatar-db://", 1)[-1] or None
+    updated_at = user_or_item.get("updated_at")
+    return str(updated_at) if updated_at else None
+
+
+def _avatar_url(request: Request, user_id: int | str | None, *, revision: str | None = None) -> str:
+    if user_id in (None, "", 0, "0"):
+        return ""
+    url = str(request.url_for("serve_user_avatar", user_id=int(user_id)))
+    if revision:
+        url = _append_query(url, "v", revision)
+    return url
+
+
 def _media_access_token(media_id: int) -> str:
     msg = str(int(media_id)).encode("utf-8")
     return hmac.new(settings.session_secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
@@ -296,10 +318,10 @@ def _normalized_preview_size(size: str | None) -> str:
 def _preview_options(size: str | None) -> tuple[str, int, int]:
     normalized = _normalized_preview_size(size)
     if normalized == "mini":
-        return normalized, 420, 74
+        return normalized, 320, 72
     if normalized == "detail":
-        return normalized, 1600, 88
-    return normalized, 960, 82
+        return normalized, 1500, 88
+    return normalized, 720, 80
 
 
 def _preview_etag(digest: str, size: str | None) -> str:
@@ -353,7 +375,7 @@ def _render_image_preview(content: bytes, mime_type: str | None, digest: str, *,
             try:
                 preview.save(output, format="WEBP", quality=quality, method=6)
                 preview_bytes = output.getvalue()
-                if len(content) <= len(preview_bytes) and len(content) <= 1_500_000 and (mime_type or "").startswith("image/"):
+                if variant == "detail" and len(content) <= len(preview_bytes) and len(content) <= 1_500_000 and (mime_type or "").startswith("image/"):
                     return _store_preview(cache_key, (content, mime_type or "image/jpeg"))
                 return _store_preview(cache_key, (preview_bytes, "image/webp"))
             except OSError:
@@ -566,7 +588,11 @@ def _with_urls(request: Request, item: dict[str, Any] | None, adult_allowed: boo
             clone["preview_url"] = _append_query(clone["preview_url"], "access", token)
             clone["download_url"] = _append_query(clone["download_url"], "access", token)
     if clone.get("user_avatar_path"):
-        clone["user_avatar_url"] = str(request.url_for("serve_user_avatar", user_id=clone.get("user_id") or clone.get("id")))
+        clone["user_avatar_url"] = _avatar_url(
+            request,
+            clone.get("user_id") or clone.get("id"),
+            revision=_avatar_revision_token(clone, path_key="user_avatar_path", file_id_key="user_avatar_file_id"),
+        )
     return _jsonable(clone)
 
 
@@ -575,7 +601,11 @@ def _with_user_urls(request: Request, user: dict[str, Any] | None) -> dict[str, 
         return None
     clone = dict(user)
     if clone.get("avatar_path"):
-        clone["avatar_url"] = str(request.url_for("serve_user_avatar", user_id=clone["id"]))
+        clone["avatar_url"] = _avatar_url(
+            request,
+            clone["id"],
+            revision=_avatar_revision_token(clone, path_key="avatar_path"),
+        )
     clone["site_owner"] = _is_site_owner_user(clone)
     return _jsonable(clone)
 
@@ -598,7 +628,11 @@ def _with_collection_urls(request: Request, collection: dict[str, Any] | None, a
         clone["cover_url"] = None
         clone["cover_locked"] = True
     if clone.get("user_avatar_path"):
-        clone["user_avatar_url"] = str(request.url_for("serve_user_avatar", user_id=clone.get("user_id") or clone.get("id")))
+        clone["user_avatar_url"] = _avatar_url(
+            request,
+            clone.get("user_id") or clone.get("id"),
+            revision=_avatar_revision_token(clone, path_key="user_avatar_path", file_id_key="user_avatar_file_id"),
+        )
     return _jsonable(clone)
 
 
@@ -1714,21 +1748,31 @@ async def serve_media_preview(media_id: int, request: Request, access: str | Non
 
 
 @app.get("/api/users/{user_id}/avatar", name="serve_user_avatar")
-async def serve_user_avatar(user_id: int) -> Response:
+async def serve_user_avatar(user_id: int, request: Request) -> Response:
     file_row = await db.get_avatar_file(user_id)
     if file_row:
         digest = hashlib.sha256(file_row["content"]).hexdigest()
         if digest != file_row["sha256"]:
             raise HTTPException(status_code=500, detail="Stored avatar failed hash verification.")
-        return Response(content=file_row["content"], media_type=file_row["mime_type"], headers={"Cache-Control": "public, max-age=86400", "X-Content-SHA256": digest})
+        etag = f"\"avatar:{digest}\""
+        headers = {"Cache-Control": "public, max-age=86400", "ETag": etag, "X-Content-SHA256": digest}
+        if _etag_matches(request, etag):
+            return Response(status_code=304, headers=headers)
+        return Response(content=file_row["content"], media_type=file_row["mime_type"], headers=headers)
 
     user = await db.get_user(user_id)
     legacy = _legacy_upload_path(user.get("avatar_path") if user else None)
     if legacy:
+        content = legacy.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        etag = f"\"avatar:{digest}\""
+        headers = {"Cache-Control": "public, max-age=86400", "ETag": etag, "X-Content-SHA256": digest}
+        if _etag_matches(request, etag):
+            return Response(status_code=304, headers=headers)
         return FileResponse(
             legacy,
             media_type=(user.get("avatar_mime_type") if user else None) or mimetypes.guess_type(str(legacy))[0] or "image/jpeg",
-            headers={"Cache-Control": "public, max-age=86400"},
+            headers=headers,
         )
 
     # Avoid repeated browser 404 spam for accounts that have no uploaded avatar yet.
